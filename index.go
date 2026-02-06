@@ -152,6 +152,19 @@ func (db *DB) DropIndex(propName string) error {
 	return nil
 }
 
+// ListIndexes returns the names of all properties that currently have a secondary index.
+func (db *DB) ListIndexes() []string {
+	var names []string
+	db.indexedProps.Range(func(key, _ any) bool {
+		names = append(names, key.(string))
+		return true
+	})
+	if names == nil {
+		names = []string{} // never return nil
+	}
+	return names
+}
+
 // ReIndex rebuilds the property index from scratch.
 // Useful after bulk inserts where index maintenance was skipped.
 func (db *DB) ReIndex(propName string) error {

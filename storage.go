@@ -112,6 +112,9 @@ func (s *shard) initBuckets() error {
 }
 
 // loadCounters loads atomic counters from the meta bucket into memory.
+// If the persisted counters look stale (e.g. the previous process exited
+// without calling Close), we recover them from the actual data in the
+// nodes/edges buckets so that IDs don't collide and counts are accurate.
 func (s *shard) loadCounters() error {
 	return s.db.View(func(tx *bolt.Tx) error {
 		meta := tx.Bucket(bucketMeta)
@@ -119,18 +122,54 @@ func (s *shard) loadCounters() error {
 			return nil
 		}
 
+		// Load persisted values.
+		var nextNode, nextEdge, nCount, eCount uint64
 		if v := meta.Get(metaNextNodeID); v != nil {
-			s.nextNodeID.Store(decodeUint64(v))
+			nextNode = decodeUint64(v)
 		}
 		if v := meta.Get(metaNextEdgeID); v != nil {
-			s.nextEdgeID.Store(decodeUint64(v))
+			nextEdge = decodeUint64(v)
 		}
 		if v := meta.Get(metaNodeCount); v != nil {
-			s.nodeCount.Store(decodeUint64(v))
+			nCount = decodeUint64(v)
 		}
 		if v := meta.Get(metaEdgeCount); v != nil {
-			s.edgeCount.Store(decodeUint64(v))
+			eCount = decodeUint64(v)
 		}
+
+		// ── Self-heal: recover from actual bucket data if meta is stale ──
+		// This handles the case where a previous process exited without
+		// calling db.Close() (so persistCounters was never invoked).
+		if nb := tx.Bucket(bucketNodes); nb != nil {
+			actualCount := uint64(nb.Stats().KeyN)
+			if actualCount > nCount {
+				nCount = actualCount
+			}
+			// Find highest node ID (last key, since keys are big-endian uint64).
+			if k, _ := nb.Cursor().Last(); k != nil {
+				maxID := decodeUint64(k)
+				if maxID >= nextNode {
+					nextNode = maxID + 1
+				}
+			}
+		}
+		if eb := tx.Bucket(bucketEdges); eb != nil {
+			actualCount := uint64(eb.Stats().KeyN)
+			if actualCount > eCount {
+				eCount = actualCount
+			}
+			if k, _ := eb.Cursor().Last(); k != nil {
+				maxID := decodeUint64(k)
+				if maxID >= nextEdge {
+					nextEdge = maxID + 1
+				}
+			}
+		}
+
+		s.nextNodeID.Store(nextNode)
+		s.nextEdgeID.Store(nextEdge)
+		s.nodeCount.Store(nCount)
+		s.edgeCount.Store(eCount)
 		return nil
 	})
 }
