@@ -1,0 +1,331 @@
+package graphdb
+
+import (
+	"fmt"
+
+	bolt "go.etcd.io/bbolt"
+)
+
+// AddNode creates a new node with the given arbitrary properties.
+// Returns the auto-generated NodeID. Safe for concurrent use.
+func (db *DB) AddNode(props Props) (NodeID, error) {
+	if db.isClosed() {
+		return 0, fmt.Errorf("graphdb: database is closed")
+	}
+
+	// For sharded mode, allocate ID from primary shard to ensure global uniqueness.
+	s := db.primaryShard()
+	id := s.allocNodeID()
+
+	// Determine which shard owns this node.
+	target := db.shardFor(id)
+
+	data, err := encodeProps(props)
+	if err != nil {
+		return 0, fmt.Errorf("graphdb: failed to encode node properties: %w", err)
+	}
+
+	err = target.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketNodes)
+		if err := b.Put(encodeNodeID(id), data); err != nil {
+			return err
+		}
+		target.nodeCount.Add(1)
+		return nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("graphdb: failed to add node: %w", err)
+	}
+
+	return id, nil
+}
+
+// AddNodeBatch creates multiple nodes in a single transaction for performance.
+// Returns the list of auto-generated NodeIDs. Safe for concurrent use.
+func (db *DB) AddNodeBatch(propsList []Props) ([]NodeID, error) {
+	if db.isClosed() {
+		return nil, fmt.Errorf("graphdb: database is closed")
+	}
+
+	ids := make([]NodeID, len(propsList))
+
+	if len(db.shards) == 1 {
+		// Single-shard fast path: all nodes go into one transaction.
+		s := db.shards[0]
+		err := s.db.Update(func(tx *bolt.Tx) error {
+			b := tx.Bucket(bucketNodes)
+			for i, props := range propsList {
+				id := s.allocNodeID()
+				ids[i] = id
+
+				data, err := encodeProps(props)
+				if err != nil {
+					return err
+				}
+				if err := b.Put(encodeNodeID(id), data); err != nil {
+					return err
+				}
+			}
+			s.nodeCount.Add(uint64(len(propsList)))
+			return nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("graphdb: batch add failed: %w", err)
+		}
+		return ids, nil
+	}
+
+	// Multi-shard path: group nodes by target shard.
+	type shardEntry struct {
+		index int
+		id    NodeID
+		data  []byte
+	}
+	shardGroups := make(map[int][]shardEntry)
+
+	s := db.primaryShard()
+	for i, props := range propsList {
+		id := s.allocNodeID()
+		ids[i] = id
+
+		data, err := encodeProps(props)
+		if err != nil {
+			return nil, fmt.Errorf("graphdb: failed to encode props at index %d: %w", i, err)
+		}
+
+		shardIdx := int(uint64(id) % uint64(len(db.shards)))
+		shardGroups[shardIdx] = append(shardGroups[shardIdx], shardEntry{
+			index: i, id: id, data: data,
+		})
+	}
+
+	// Write each shard's batch in a separate transaction.
+	for shardIdx, entries := range shardGroups {
+		target := db.shards[shardIdx]
+		err := target.db.Update(func(tx *bolt.Tx) error {
+			b := tx.Bucket(bucketNodes)
+			for _, e := range entries {
+				if err := b.Put(encodeNodeID(e.id), e.data); err != nil {
+					return err
+				}
+			}
+			target.nodeCount.Add(uint64(len(entries)))
+			return nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("graphdb: batch add failed on shard %d: %w", shardIdx, err)
+		}
+	}
+
+	return ids, nil
+}
+
+// GetNode retrieves a node by its ID. Safe for concurrent use.
+func (db *DB) GetNode(id NodeID) (*Node, error) {
+	if db.isClosed() {
+		return nil, fmt.Errorf("graphdb: database is closed")
+	}
+	return db.getNode(id)
+}
+
+// getNode is the lock-free internal version of GetNode.
+// Called by BFS/DFS/ShortestPath etc. which need to call this many times during traversal.
+func (db *DB) getNode(id NodeID) (*Node, error) {
+	s := db.shardFor(id)
+	var node *Node
+
+	err := s.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketNodes)
+		data := b.Get(encodeNodeID(id))
+		if data == nil {
+			return fmt.Errorf("graphdb: node %d not found", id)
+		}
+
+		props, err := decodeProps(data)
+		if err != nil {
+			return err
+		}
+
+		node = &Node{ID: id, Props: props}
+		return nil
+	})
+
+	return node, err
+}
+
+// UpdateNode updates the properties of an existing node.
+// The update is a merge: existing properties are kept unless overwritten.
+func (db *DB) UpdateNode(id NodeID, props Props) error {
+	if db.isClosed() {
+		return fmt.Errorf("graphdb: database is closed")
+	}
+
+	s := db.shardFor(id)
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketNodes)
+		key := encodeNodeID(id)
+
+		existing := b.Get(key)
+		if existing == nil {
+			return fmt.Errorf("graphdb: node %d not found", id)
+		}
+
+		// Merge properties.
+		existingProps, err := decodeProps(existing)
+		if err != nil {
+			return err
+		}
+		for k, v := range props {
+			existingProps[k] = v
+		}
+
+		data, err := encodeProps(existingProps)
+		if err != nil {
+			return err
+		}
+		return b.Put(key, data)
+	})
+}
+
+// SetNodeProps replaces all properties of a node (full overwrite).
+func (db *DB) SetNodeProps(id NodeID, props Props) error {
+	if db.isClosed() {
+		return fmt.Errorf("graphdb: database is closed")
+	}
+
+	s := db.shardFor(id)
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketNodes)
+		key := encodeNodeID(id)
+
+		if b.Get(key) == nil {
+			return fmt.Errorf("graphdb: node %d not found", id)
+		}
+
+		data, err := encodeProps(props)
+		if err != nil {
+			return err
+		}
+		return b.Put(key, data)
+	})
+}
+
+// DeleteNode removes a node and all its associated edges.
+func (db *DB) DeleteNode(id NodeID) error {
+	if db.isClosed() {
+		return fmt.Errorf("graphdb: database is closed")
+	}
+
+	// First, collect all edges connected to this node.
+	edges, err := db.getEdgesForNode(id, Both)
+	if err != nil {
+		return err
+	}
+
+	// Delete all connected edges.
+	for _, e := range edges {
+		if err := db.deleteEdgeInternal(e); err != nil {
+			return fmt.Errorf("graphdb: failed to delete edge %d while deleting node %d: %w", e.ID, id, err)
+		}
+	}
+
+	// Delete the node itself.
+	s := db.shardFor(id)
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketNodes)
+		key := encodeNodeID(id)
+		if b.Get(key) == nil {
+			return fmt.Errorf("graphdb: node %d not found", id)
+		}
+		if err := b.Delete(key); err != nil {
+			return err
+		}
+		s.nodeCount.Add(^uint64(0)) // decrement by 1
+		return nil
+	})
+}
+
+// NodeExists checks if a node exists. Safe for concurrent use.
+func (db *DB) NodeExists(id NodeID) (bool, error) {
+	if db.isClosed() {
+		return false, fmt.Errorf("graphdb: database is closed")
+	}
+
+	s := db.shardFor(id)
+	exists := false
+	err := s.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketNodes)
+		exists = b.Get(encodeNodeID(id)) != nil
+		return nil
+	})
+	return exists, err
+}
+
+// NodeCount returns the total number of nodes in the database.
+func (db *DB) NodeCount() uint64 {
+	var total uint64
+	for _, s := range db.shards {
+		total += s.nodeCount.Load()
+	}
+	return total
+}
+
+// ForEachNode iterates over all nodes, calling fn for each.
+// Return a non-nil error from fn to stop iteration. Safe for concurrent use.
+func (db *DB) ForEachNode(fn func(*Node) error) error {
+	if db.isClosed() {
+		return fmt.Errorf("graphdb: database is closed")
+	}
+	return db.forEachNode(fn)
+}
+
+// forEachNode is the lock-free internal version.
+func (db *DB) forEachNode(fn func(*Node) error) error {
+	for _, s := range db.shards {
+		err := s.db.View(func(tx *bolt.Tx) error {
+			b := tx.Bucket(bucketNodes)
+			return b.ForEach(func(k, v []byte) error {
+				id := decodeNodeID(k)
+				props, err := decodeProps(v)
+				if err != nil {
+					return err
+				}
+				return fn(&Node{ID: id, Props: props})
+			})
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// FindNodes returns all nodes matching the given filter. Safe for concurrent use.
+func (db *DB) FindNodes(filter NodeFilter) ([]*Node, error) {
+	if db.isClosed() {
+		return nil, fmt.Errorf("graphdb: database is closed")
+	}
+
+	var results []*Node
+	for _, s := range db.shards {
+		err := s.db.View(func(tx *bolt.Tx) error {
+			b := tx.Bucket(bucketNodes)
+			return b.ForEach(func(k, v []byte) error {
+				id := decodeNodeID(k)
+				props, err := decodeProps(v)
+				if err != nil {
+					return err
+				}
+				node := &Node{ID: id, Props: props}
+				if filter(node) {
+					results = append(results, node)
+				}
+				return nil
+			})
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	return results, nil
+}

@@ -1,0 +1,155 @@
+package graphdb
+
+import (
+	"bytes"
+	"fmt"
+
+	bolt "go.etcd.io/bbolt"
+)
+
+// CreateIndex creates a secondary index on a node property.
+// This allows fast lookups of nodes by property value.
+// Example: CreateIndex("name") enables fast FindByProperty("name", "Alice").
+func (db *DB) CreateIndex(propName string) error {
+	if db.isClosed() {
+		return fmt.Errorf("graphdb: database is closed")
+	}
+
+	for _, s := range db.shards {
+		err := s.db.Update(func(tx *bolt.Tx) error {
+			idxBucket := tx.Bucket(bucketIdxProp)
+			nodesBucket := tx.Bucket(bucketNodes)
+
+			// Scan all nodes and index the specified property.
+			return nodesBucket.ForEach(func(k, v []byte) error {
+				props, err := decodeProps(v)
+				if err != nil {
+					return nil // skip corrupted entries
+				}
+
+				val, ok := props[propName]
+				if !ok {
+					return nil
+				}
+
+				// Create index key: "propName:value" + nodeID
+				idxKeyStr := fmt.Sprintf("%s:%v", propName, val)
+				nodeID := decodeNodeID(k)
+				idxKey := encodeIndexKey(idxKeyStr, uint64(nodeID))
+
+				return idxBucket.Put(idxKey, nil)
+			})
+		})
+		if err != nil {
+			return fmt.Errorf("graphdb: failed to create index on %s: %w", propName, err)
+		}
+	}
+	return nil
+}
+
+// FindByProperty finds nodes where the given property equals the given value.
+// Uses the secondary index if available, otherwise falls back to full scan.
+func (db *DB) FindByProperty(propName string, value interface{}) ([]*Node, error) {
+	if db.isClosed() {
+		return nil, fmt.Errorf("graphdb: database is closed")
+	}
+
+	idxKeyStr := fmt.Sprintf("%s:%v", propName, value)
+	prefix := encodeIndexPrefix(idxKeyStr)
+
+	var nodes []*Node
+
+	for _, s := range db.shards {
+		err := s.db.View(func(tx *bolt.Tx) error {
+			idxBucket := tx.Bucket(bucketIdxProp)
+			nodesBucket := tx.Bucket(bucketNodes)
+
+			// Try index first.
+			c := idxBucket.Cursor()
+			found := false
+			for k, _ := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, _ = c.Next() {
+				found = true
+				// Extract node ID from index key.
+				nodeIDBytes := k[len(prefix):]
+				if len(nodeIDBytes) < 8 {
+					continue
+				}
+				nodeID := decodeNodeID(nodeIDBytes)
+
+				data := nodesBucket.Get(encodeNodeID(nodeID))
+				if data == nil {
+					continue
+				}
+				props, err := decodeProps(data)
+				if err != nil {
+					continue
+				}
+				nodes = append(nodes, &Node{ID: nodeID, Props: props})
+			}
+
+			// If no index entries found, fall back to full scan.
+			if !found {
+				return nodesBucket.ForEach(func(k, v []byte) error {
+					props, err := decodeProps(v)
+					if err != nil {
+						return nil
+					}
+					if val, ok := props[propName]; ok && fmt.Sprintf("%v", val) == fmt.Sprintf("%v", value) {
+						nodeID := decodeNodeID(k)
+						nodes = append(nodes, &Node{ID: nodeID, Props: props})
+					}
+					return nil
+				})
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return nodes, nil
+}
+
+// DropIndex removes a secondary index on a property.
+func (db *DB) DropIndex(propName string) error {
+	if db.isClosed() {
+		return fmt.Errorf("graphdb: database is closed")
+	}
+
+	prefix := []byte(propName + ":")
+
+	for _, s := range db.shards {
+		err := s.db.Update(func(tx *bolt.Tx) error {
+			idxBucket := tx.Bucket(bucketIdxProp)
+			c := idxBucket.Cursor()
+
+			var toDelete [][]byte
+			for k, _ := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, _ = c.Next() {
+				keyCopy := make([]byte, len(k))
+				copy(keyCopy, k)
+				toDelete = append(toDelete, keyCopy)
+			}
+
+			for _, k := range toDelete {
+				if err := idxBucket.Delete(k); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return fmt.Errorf("graphdb: failed to drop index on %s: %w", propName, err)
+		}
+	}
+	return nil
+}
+
+// ReIndex rebuilds the property index from scratch.
+// Useful after bulk inserts where index maintenance was skipped.
+func (db *DB) ReIndex(propName string) error {
+	if err := db.DropIndex(propName); err != nil {
+		return err
+	}
+	return db.CreateIndex(propName)
+}
