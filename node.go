@@ -30,6 +30,10 @@ func (db *DB) AddNode(props Props) (NodeID, error) {
 		if err := b.Put(encodeNodeID(id), data); err != nil {
 			return err
 		}
+		// Maintain secondary indexes (same tx, no extra fsync).
+		if err := db.indexNodeProps(tx, id, props); err != nil {
+			return err
+		}
 		target.nodeCount.Add(1)
 		return nil
 	})
@@ -42,6 +46,14 @@ func (db *DB) AddNode(props Props) (NodeID, error) {
 
 // AddNodeBatch creates multiple nodes in a single transaction for performance.
 // Returns the list of auto-generated NodeIDs. Safe for concurrent use.
+//
+// Note: AddNodeBatch does NOT auto-maintain secondary indexes for performance.
+// Large batches with inline index maintenance cause excessive B+tree page splits,
+// degrading insert throughput by orders of magnitude. Call ReIndex() or
+// CreateIndex() after a batch insert to rebuild indexes.
+//
+// Single-node AddNode, UpdateNode, SetNodeProps, and DeleteNode DO auto-maintain
+// indexes since the overhead is negligible for individual operations.
 func (db *DB) AddNodeBatch(propsList []Props) ([]NodeID, error) {
 	if db.isClosed() {
 		return nil, fmt.Errorf("graphdb: database is closed")
@@ -155,6 +167,7 @@ func (db *DB) getNode(id NodeID) (*Node, error) {
 
 // UpdateNode updates the properties of an existing node.
 // The update is a merge: existing properties are kept unless overwritten.
+// Secondary indexes are updated automatically for changed indexed properties.
 func (db *DB) UpdateNode(id NodeID, props Props) error {
 	if db.isClosed() {
 		return fmt.Errorf("graphdb: database is closed")
@@ -170,24 +183,37 @@ func (db *DB) UpdateNode(id NodeID, props Props) error {
 			return fmt.Errorf("graphdb: node %d not found", id)
 		}
 
-		// Merge properties.
-		existingProps, err := decodeProps(existing)
+		// Decode old properties for index maintenance.
+		oldProps, err := decodeProps(existing)
 		if err != nil {
 			return err
-		}
-		for k, v := range props {
-			existingProps[k] = v
 		}
 
-		data, err := encodeProps(existingProps)
+		// Remove old index entries before mutation.
+		if err := db.unindexNodeProps(tx, id, oldProps); err != nil {
+			return err
+		}
+
+		// Merge properties.
+		for k, v := range props {
+			oldProps[k] = v
+		}
+
+		data, err := encodeProps(oldProps)
 		if err != nil {
 			return err
 		}
-		return b.Put(key, data)
+		if err := b.Put(key, data); err != nil {
+			return err
+		}
+
+		// Add new index entries with merged properties.
+		return db.indexNodeProps(tx, id, oldProps)
 	})
 }
 
 // SetNodeProps replaces all properties of a node (full overwrite).
+// Secondary indexes are updated automatically.
 func (db *DB) SetNodeProps(id NodeID, props Props) error {
 	if db.isClosed() {
 		return fmt.Errorf("graphdb: database is closed")
@@ -198,15 +224,30 @@ func (db *DB) SetNodeProps(id NodeID, props Props) error {
 		b := tx.Bucket(bucketNodes)
 		key := encodeNodeID(id)
 
-		if b.Get(key) == nil {
+		existing := b.Get(key)
+		if existing == nil {
 			return fmt.Errorf("graphdb: node %d not found", id)
+		}
+
+		// Remove old index entries.
+		oldProps, err := decodeProps(existing)
+		if err != nil {
+			return err
+		}
+		if err := db.unindexNodeProps(tx, id, oldProps); err != nil {
+			return err
 		}
 
 		data, err := encodeProps(props)
 		if err != nil {
 			return err
 		}
-		return b.Put(key, data)
+		if err := b.Put(key, data); err != nil {
+			return err
+		}
+
+		// Add new index entries.
+		return db.indexNodeProps(tx, id, props)
 	})
 }
 
@@ -229,14 +270,22 @@ func (db *DB) DeleteNode(id NodeID) error {
 		}
 	}
 
-	// Delete the node itself.
+	// Delete the node itself (and clean up index entries).
 	s := db.shardFor(id)
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketNodes)
 		key := encodeNodeID(id)
-		if b.Get(key) == nil {
+
+		existing := b.Get(key)
+		if existing == nil {
 			return fmt.Errorf("graphdb: node %d not found", id)
 		}
+
+		// Remove index entries before deleting the node.
+		if props, err := decodeProps(existing); err == nil {
+			_ = db.unindexNodeProps(tx, id, props)
+		}
+
 		if err := b.Delete(key); err != nil {
 			return err
 		}

@@ -160,3 +160,60 @@ func (db *DB) ReIndex(propName string) error {
 	}
 	return db.CreateIndex(propName)
 }
+
+// ---------------------------------------------------------------------------
+// Index maintenance helpers — called inside bbolt write transactions by
+// AddNode, UpdateNode, SetNodeProps, DeleteNode to keep indexes up-to-date.
+// ---------------------------------------------------------------------------
+
+// indexNodeProps adds index entries for all indexed properties of a node.
+// Must be called within a bbolt Update transaction on the correct shard.
+func (db *DB) indexNodeProps(tx *bolt.Tx, nodeID NodeID, props Props) error {
+	if len(props) == 0 {
+		return nil
+	}
+	idxBucket := tx.Bucket(bucketIdxProp)
+
+	var firstErr error
+	db.indexedProps.Range(func(key, _ any) bool {
+		propName := key.(string)
+		val, ok := props[propName]
+		if !ok {
+			return true // property not present in this node
+		}
+		idxKeyStr := fmt.Sprintf("%s:%v", propName, val)
+		idxKey := encodeIndexKey(idxKeyStr, uint64(nodeID))
+		if err := idxBucket.Put(idxKey, nil); err != nil {
+			firstErr = err
+			return false
+		}
+		return true
+	})
+	return firstErr
+}
+
+// unindexNodeProps removes index entries for all indexed properties of a node.
+// Must be called within a bbolt Update transaction on the correct shard.
+func (db *DB) unindexNodeProps(tx *bolt.Tx, nodeID NodeID, props Props) error {
+	if len(props) == 0 {
+		return nil
+	}
+	idxBucket := tx.Bucket(bucketIdxProp)
+
+	var firstErr error
+	db.indexedProps.Range(func(key, _ any) bool {
+		propName := key.(string)
+		val, ok := props[propName]
+		if !ok {
+			return true
+		}
+		idxKeyStr := fmt.Sprintf("%s:%v", propName, val)
+		idxKey := encodeIndexKey(idxKeyStr, uint64(nodeID))
+		if err := idxBucket.Delete(idxKey); err != nil {
+			firstErr = err
+			return false
+		}
+		return true
+	})
+	return firstErr
+}
