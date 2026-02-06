@@ -1,0 +1,12 @@
+# Go
+*.db
+*.db/
+data.db/
+quickstart.db/
+
+# Node / UI
+ui/node_modules/
+ui/dist/
+
+# OS
+.DS_Store
