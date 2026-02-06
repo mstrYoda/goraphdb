@@ -2,6 +2,8 @@
 
 A high-performance, embeddable graph database written in Go. Built on top of [bbolt](https://github.com/etcd-io/bbolt) (B+tree key-value store), it supports concurrent queries, secondary indexes, optional hash-based sharding, and a subset of the Cypher query language — all in a single dependency-free binary.
 
+![Query Editor Screenshot](assets/query.png)
+
 ## Features
 
 - **Directed labeled graph** — nodes and edges with arbitrary JSON-like properties  
