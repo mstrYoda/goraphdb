@@ -1,10 +1,14 @@
 package graphdb
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 )
+
+// errLimitReached is a sentinel used to stop ForEachNode early when LIMIT is satisfied.
+var errLimitReached = errors.New("graphdb: limit reached")
 
 // --------------------------------------------------------------------------
 // Cypher Executor — runs a parsed CypherQuery against the graph database.
@@ -70,7 +74,36 @@ func (db *DB) execNodeMatch(q *CypherQuery) (*CypherResult, error) {
 		varName = "_n" // anonymous
 	}
 
-	// Collect matching nodes.
+	hasOrderBy := len(q.OrderBy) > 0
+	limit := q.Limit
+
+	// ------------------------------------------------------------------
+	// Optimization 1: Index-accelerated inline property lookup.
+	//   MATCH (n {name: "Alice"}) → use FindByProperty if "name" is indexed.
+	// ------------------------------------------------------------------
+	if len(nodePat.Props) > 0 {
+		for key, val := range nodePat.Props {
+			if db.HasIndex(key) {
+				return db.execNodeMatchWithIndex(q, key, val, nodePat, varName)
+			}
+		}
+	}
+
+	// ------------------------------------------------------------------
+	// Optimization 2: Extract equality from WHERE for index lookup.
+	//   MATCH (n) WHERE n.city = "Istanbul" → use FindByProperty if "city" is indexed.
+	// ------------------------------------------------------------------
+	if q.Where != nil && len(nodePat.Props) == 0 {
+		if prop, val, ok := extractWhereEquality(q.Where, varName); ok {
+			if db.HasIndex(prop) {
+				return db.execNodeMatchWhereIndexed(q, prop, val, nodePat, varName)
+			}
+		}
+	}
+
+	// ------------------------------------------------------------------
+	// Fallback: full scan with inline filter + LIMIT push-down.
+	// ------------------------------------------------------------------
 	var nodes []*Node
 	err := db.forEachNode(func(n *Node) error {
 		// Inline property filter.
@@ -89,13 +122,111 @@ func (db *DB) execNodeMatch(q *CypherQuery) (*CypherResult, error) {
 			}
 		}
 		nodes = append(nodes, n)
+
+		// Early exit: if LIMIT with no ORDER BY, stop once we have enough.
+		if limit > 0 && !hasOrderBy && len(nodes) >= limit {
+			return errLimitReached
+		}
 		return nil
 	})
-	if err != nil {
+	if err != nil && !errors.Is(err, errLimitReached) {
 		return nil, err
 	}
 
 	return db.projectResults(q, nodes, nil, varName, "")
+}
+
+// execNodeMatchWithIndex uses a secondary index to resolve inline property filters.
+// Example: MATCH (n {name: "Alice"}) — if "name" is indexed, avoids full scan.
+func (db *DB) execNodeMatchWithIndex(q *CypherQuery, indexKey string, indexVal any, nodePat NodePattern, varName string) (*CypherResult, error) {
+	candidates, err := db.FindByProperty(indexKey, indexVal)
+	if err != nil {
+		return nil, err
+	}
+
+	// Apply remaining inline property filters and WHERE clause.
+	var nodes []*Node
+	for _, n := range candidates {
+		if !matchProps(n.Props, nodePat.Props) {
+			continue
+		}
+		if q.Where != nil {
+			bindings := map[string]any{varName: n}
+			ok, err := evalBool(q.Where, bindings)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				continue
+			}
+		}
+		nodes = append(nodes, n)
+	}
+
+	return db.projectResults(q, nodes, nil, varName, "")
+}
+
+// execNodeMatchWhereIndexed uses a secondary index to resolve a simple WHERE equality.
+// Example: MATCH (n) WHERE n.city = "Istanbul" — if "city" is indexed, avoids full scan.
+func (db *DB) execNodeMatchWhereIndexed(q *CypherQuery, prop string, val any, nodePat NodePattern, varName string) (*CypherResult, error) {
+	candidates, err := db.FindByProperty(prop, val)
+	if err != nil {
+		return nil, err
+	}
+
+	// The indexed equality is already satisfied; apply remaining WHERE conditions.
+	var nodes []*Node
+	for _, n := range candidates {
+		if !matchProps(n.Props, nodePat.Props) {
+			continue
+		}
+		if q.Where != nil {
+			bindings := map[string]any{varName: n}
+			ok, err := evalBool(q.Where, bindings)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				continue
+			}
+		}
+		nodes = append(nodes, n)
+	}
+
+	return db.projectResults(q, nodes, nil, varName, "")
+}
+
+// extractWhereEquality checks if a WHERE expression is a simple equality comparison
+// (e.g. n.city = "Istanbul") that can be resolved via index lookup.
+// Returns (propertyName, literalValue, true) if extractable, or ("", nil, false).
+func extractWhereEquality(where *Expression, nodeVar string) (string, any, bool) {
+	if where == nil {
+		return "", nil, false
+	}
+
+	// Direct equality: n.prop = literal
+	if where.Kind == ExprComparison && where.Op == OpEq {
+		if where.Left != nil && where.Left.Kind == ExprPropAccess && where.Left.Object == nodeVar &&
+			where.Right != nil && where.Right.Kind == ExprLiteral {
+			return where.Left.Property, where.Right.LitValue, true
+		}
+		// Reversed: literal = n.prop
+		if where.Right != nil && where.Right.Kind == ExprPropAccess && where.Right.Object == nodeVar &&
+			where.Left != nil && where.Left.Kind == ExprLiteral {
+			return where.Right.Property, where.Left.LitValue, true
+		}
+	}
+
+	// AND expression: extract from first matching operand.
+	if where.Kind == ExprAnd {
+		for _, op := range where.Operands {
+			if prop, val, ok := extractWhereEquality(&op, nodeVar); ok {
+				return prop, val, true
+			}
+		}
+	}
+
+	return "", nil, false
 }
 
 // ---------------------------------------------------------------------------
@@ -260,10 +391,11 @@ func (db *DB) execVarLengthMatch(q *CypherQuery) (*CypherResult, error) {
 }
 
 // ---------------------------------------------------------------------------
-// Candidate finding
+// Candidate finding — index-aware
 // ---------------------------------------------------------------------------
 
 // findCandidates finds all nodes matching a NodePattern's inline properties.
+// Uses secondary indexes when available to avoid full table scans.
 func (db *DB) findCandidates(np NodePattern) ([]*Node, error) {
 	if len(np.Props) == 0 {
 		// No inline filter → all nodes.
@@ -275,7 +407,28 @@ func (db *DB) findCandidates(np NodePattern) ([]*Node, error) {
 		return nodes, err
 	}
 
-	// Filter by inline props.
+	// Try index-accelerated lookup: pick the first indexed property.
+	for key, val := range np.Props {
+		if db.HasIndex(key) {
+			candidates, err := db.FindByProperty(key, val)
+			if err != nil {
+				return nil, err
+			}
+			// If there are additional inline props, filter them out.
+			if len(np.Props) > 1 {
+				var filtered []*Node
+				for _, n := range candidates {
+					if matchProps(n.Props, np.Props) {
+						filtered = append(filtered, n)
+					}
+				}
+				return filtered, nil
+			}
+			return candidates, nil
+		}
+	}
+
+	// No index available → full scan fallback.
 	return db.FindNodes(func(n *Node) bool {
 		return matchProps(n.Props, np.Props)
 	})

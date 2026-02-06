@@ -10,6 +10,7 @@ import (
 // CreateIndex creates a secondary index on a node property.
 // This allows fast lookups of nodes by property value.
 // Example: CreateIndex("name") enables fast FindByProperty("name", "Alice").
+// Cypher queries automatically use available indexes for inline property filters.
 func (db *DB) CreateIndex(propName string) error {
 	if db.isClosed() {
 		return fmt.Errorf("graphdb: database is closed")
@@ -44,6 +45,9 @@ func (db *DB) CreateIndex(propName string) error {
 			return fmt.Errorf("graphdb: failed to create index on %s: %w", propName, err)
 		}
 	}
+
+	// Register the index in memory for the query optimizer.
+	db.indexedProps.Store(propName, true)
 	return nil
 }
 
@@ -53,6 +57,8 @@ func (db *DB) FindByProperty(propName string, value interface{}) ([]*Node, error
 	if db.isClosed() {
 		return nil, fmt.Errorf("graphdb: database is closed")
 	}
+
+	_, hasIndex := db.indexedProps.Load(propName)
 
 	idxKeyStr := fmt.Sprintf("%s:%v", propName, value)
 	prefix := encodeIndexPrefix(idxKeyStr)
@@ -64,44 +70,42 @@ func (db *DB) FindByProperty(propName string, value interface{}) ([]*Node, error
 			idxBucket := tx.Bucket(bucketIdxProp)
 			nodesBucket := tx.Bucket(bucketNodes)
 
-			// Try index first.
-			c := idxBucket.Cursor()
-			found := false
-			for k, _ := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, _ = c.Next() {
-				found = true
-				// Extract node ID from index key.
-				nodeIDBytes := k[len(prefix):]
-				if len(nodeIDBytes) < 8 {
-					continue
-				}
-				nodeID := decodeNodeID(nodeIDBytes)
+			if hasIndex {
+				// Fast path: use the secondary index (prefix seek).
+				c := idxBucket.Cursor()
+				for k, _ := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, _ = c.Next() {
+					nodeIDBytes := k[len(prefix):]
+					if len(nodeIDBytes) < 8 {
+						continue
+					}
+					nodeID := decodeNodeID(nodeIDBytes)
 
-				data := nodesBucket.Get(encodeNodeID(nodeID))
-				if data == nil {
-					continue
-				}
-				props, err := decodeProps(data)
-				if err != nil {
-					continue
-				}
-				nodes = append(nodes, &Node{ID: nodeID, Props: props})
-			}
-
-			// If no index entries found, fall back to full scan.
-			if !found {
-				return nodesBucket.ForEach(func(k, v []byte) error {
-					props, err := decodeProps(v)
+					data := nodesBucket.Get(encodeNodeID(nodeID))
+					if data == nil {
+						continue
+					}
+					props, err := decodeProps(data)
 					if err != nil {
-						return nil
+						continue
 					}
-					if val, ok := props[propName]; ok && fmt.Sprintf("%v", val) == fmt.Sprintf("%v", value) {
-						nodeID := decodeNodeID(k)
-						nodes = append(nodes, &Node{ID: nodeID, Props: props})
-					}
-					return nil
-				})
+					nodes = append(nodes, &Node{ID: nodeID, Props: props})
+				}
+				// Trust the index: if no entries match, the result is empty.
+				return nil
 			}
-			return nil
+
+			// Slow path: no index — full scan fallback.
+			return nodesBucket.ForEach(func(k, v []byte) error {
+				props, err := decodeProps(v)
+				if err != nil {
+					return nil
+				}
+				if val, ok := props[propName]; ok && fmt.Sprintf("%v", val) == fmt.Sprintf("%v", value) {
+					nodeID := decodeNodeID(k)
+					nodes = append(nodes, &Node{ID: nodeID, Props: props})
+				}
+				return nil
+			})
 		})
 		if err != nil {
 			return nil, err
@@ -142,6 +146,9 @@ func (db *DB) DropIndex(propName string) error {
 			return fmt.Errorf("graphdb: failed to drop index on %s: %w", propName, err)
 		}
 	}
+
+	// Remove from in-memory tracking.
+	db.indexedProps.Delete(propName)
 	return nil
 }
 

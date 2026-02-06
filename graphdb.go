@@ -1,10 +1,13 @@
 package graphdb
 
 import (
+	"bytes"
 	"fmt"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+
+	bolt "go.etcd.io/bbolt"
 )
 
 // DB is the main graph database instance. It manages one or more shards,
@@ -15,12 +18,13 @@ import (
 //   - Write operations (AddNode, AddEdge, etc.) are serialized per-shard by bbolt.
 //   - The closed flag is an atomic.Bool so reads never hold a mutex — no recursive lock issues.
 type DB struct {
-	opts   Options
-	dir    string
-	shards []*shard
-	pool   *workerPool
-	mu     sync.Mutex    // only used in Close() to prevent double-close
-	closed atomic.Bool   // atomic flag — checked by every operation without locking
+	opts         Options
+	dir          string
+	shards       []*shard
+	pool         *workerPool
+	mu           sync.Mutex  // only used in Close() to prevent double-close
+	closed       atomic.Bool // atomic flag — checked by every operation without locking
+	indexedProps sync.Map    // map[string]bool — tracks which property names have secondary indexes
 }
 
 // Open creates or opens a graph database at the given directory path.
@@ -59,7 +63,46 @@ func Open(dir string, opts Options) (*DB, error) {
 	// Start the worker pool for concurrent queries.
 	db.pool = newWorkerPool(opts.WorkerPoolSize)
 
+	// Discover existing property indexes from disk (survives restart).
+	db.discoverIndexes()
+
 	return db, nil
+}
+
+// discoverIndexes scans the idx_prop bucket to learn which properties are indexed.
+// Uses seek-jumping so cost is O(#unique indexed properties), not O(#index entries).
+func (db *DB) discoverIndexes() {
+	for _, s := range db.shards {
+		_ = s.db.View(func(tx *bolt.Tx) error {
+			b := tx.Bucket(bucketIdxProp)
+			if b == nil {
+				return nil
+			}
+			c := b.Cursor()
+			k, _ := c.First()
+			for k != nil {
+				colonIdx := bytes.IndexByte(k, ':')
+				if colonIdx > 0 {
+					prop := string(k[:colonIdx])
+					db.indexedProps.Store(prop, true)
+					// Jump past all entries for this property.
+					nextPrefix := make([]byte, colonIdx+1)
+					copy(nextPrefix, k[:colonIdx])
+					nextPrefix[colonIdx] = ':' + 1 // ';' > ':'
+					k, _ = c.Seek(nextPrefix)
+				} else {
+					k, _ = c.Next()
+				}
+			}
+			return nil
+		})
+	}
+}
+
+// HasIndex returns true if a secondary index exists for the given property name.
+func (db *DB) HasIndex(propName string) bool {
+	_, ok := db.indexedProps.Load(propName)
+	return ok
 }
 
 // Close gracefully shuts down the database, flushing all pending writes.
