@@ -492,6 +492,38 @@ go test -race ./...        # race detector
 go test -bench=. -benchmem # benchmarks
 ```
 
+## Roadmap
+
+### Phase 1 — Foundation
+- [ ] **Hot Backup / Restore** — consistent snapshot using bbolt's built-in `WriteTo`, zero downtime
+- [ ] **Write-Ahead Log (WAL)** — log every mutation to a sequential file before applying to bbolt; enables replication and point-in-time recovery
+- [ ] **Write Cypher** — `CREATE`, `SET`, `DELETE`, `MERGE` support in the Cypher engine
+- [ ] **Prometheus Metrics** — `graphdb_nodes_total`, `graphdb_query_duration_seconds`, `graphdb_write_ops_total`, etc.
+
+### Phase 2 — Replication & Reliability
+- [ ] **Raft-based Replication** — each shard group runs a Raft consensus group (`hashicorp/raft`) with 1 leader + N followers for automatic failover
+- [ ] **Point-in-Time Recovery** — replay WAL from a backup snapshot to restore data to any past timestamp
+- [ ] **Change Data Capture (CDC)** — streaming API for external consumers to subscribe to graph mutations in real time
+- [ ] **Authentication & TLS** — user/password auth and encrypted connections for network-exposed deployments
+
+### Phase 3 — Distributed Cluster
+- [ ] **gRPC Inter-Node Protocol** — `ForwardQuery`, `ForwardWrite`, `TransferShard`, `Heartbeat` RPCs between cluster nodes
+- [ ] **Cluster Membership** — node discovery and health checking via gossip protocol (`hashicorp/memberlist`)
+- [ ] **Shard Placement Manager** — catalog of shard→node assignments, stored in its own Raft group
+- [ ] **Distributed Query Coordinator** — route Cypher queries to the correct node(s), scatter-gather for cross-shard queries, merge results
+- [ ] **Distributed Edge Writes** — two-phase commit for edges that span different cluster nodes
+- [ ] **Shard Rebalancing & Migration** — move shards between nodes when a node joins or leaves the cluster
+- [ ] **Cluster-Aware UI** — topology view, per-node stats, shard distribution map, leader/follower status
+
+### Phase 4 — Production Hardening
+- [ ] **Range Indexes** — B+tree range scans for numerical/date properties (`WHERE n.age > 25` without full scan)
+- [ ] **Graph Partitioning** — smarter shard placement (METIS/Fennel) to minimize cross-shard edges
+- [ ] **Read Replicas** — route read-only Cypher to Raft followers, writes to leader
+- [ ] **Bloom Filters** — fast `HasEdge()` checks without touching disk
+- [ ] **Schema Constraints** — unique properties, required fields, edge cardinality rules
+- [ ] **Query Timeout & Cancellation** — context-based cancellation for long-running queries
+- [ ] **Connection Pooling & Rate Limiting** — protect against runaway queries in multi-tenant setups
+
 ## License
 
 MIT
