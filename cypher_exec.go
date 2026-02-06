@@ -1,10 +1,14 @@
 package graphdb
 
 import (
+	"bytes"
+	"container/heap"
 	"errors"
 	"fmt"
 	"sort"
 	"strings"
+
+	bolt "go.etcd.io/bbolt"
 )
 
 // errLimitReached is a sentinel used to stop ForEachNode early when LIMIT is satisfied.
@@ -25,15 +29,22 @@ type CypherResult struct {
 }
 
 // Cypher parses and executes a Cypher query string against the database.
+// Identical query strings are cached after the first parse (lock-free).
 // Safe for concurrent use.
 func (db *DB) Cypher(query string) (*CypherResult, error) {
 	if db.isClosed() {
 		return nil, fmt.Errorf("graphdb: database is closed")
 	}
 
-	ast, err := parseCypher(query)
-	if err != nil {
-		return nil, err
+	// Fast path: cache hit — skip lexer+parser entirely.
+	ast := db.cache.get(query)
+	if ast == nil {
+		var err error
+		ast, err = parseCypher(query)
+		if err != nil {
+			return nil, err
+		}
+		db.cache.put(query, ast)
 	}
 
 	return db.executeCypher(ast)
@@ -249,6 +260,17 @@ func (db *DB) execSingleHopMatch(q *CypherQuery) (*CypherResult, error) {
 	}
 	rVar := rel.Variable // may be ""
 
+	// ------------------------------------------------------------------
+	// Optimization: Edge-type direct scan.
+	// When the start node has no inline property filter, scanning the
+	// idx_edge_type index directly is faster than loading ALL nodes and
+	// then checking each node's adjacency list.  Everything runs inside
+	// a single View transaction per shard (great for locality).
+	// ------------------------------------------------------------------
+	if len(aPat.Props) == 0 && rel.Label != "" && rel.Dir == Outgoing {
+		return db.execSingleHopByEdgeType(q, aPat, rel, bPat, aVar, rVar, bVar)
+	}
+
 	// Step 1: Find all candidate "a" nodes.
 	aCandidates, err := db.findCandidates(aPat)
 	if err != nil {
@@ -309,6 +331,105 @@ func (db *DB) execSingleHopMatch(q *CypherQuery) (*CypherResult, error) {
 	}
 
 	// Step 3: Project RETURN items.
+	return db.projectPatternResults(q, rows, aVar, rVar, bVar)
+}
+
+// execSingleHopByEdgeType uses the idx_edge_type index to directly scan all
+// edges of a given type, avoiding the need to load all nodes first.
+// Runs in a single View transaction per shard for maximum efficiency.
+//
+// Applies to: MATCH (a)-[:LABEL]->(b) with no inline filter on "a".
+func (db *DB) execSingleHopByEdgeType(q *CypherQuery, aPat NodePattern, rel RelPattern, bPat NodePattern, aVar, rVar, bVar string) (*CypherResult, error) {
+	prefix := encodeIndexPrefix(rel.Label)
+	var rows []resultRow
+
+	for _, s := range db.shards {
+		err := s.db.View(func(tx *bolt.Tx) error {
+			idxBucket := tx.Bucket(bucketIdxEdgeTyp)
+			edgeBucket := tx.Bucket(bucketEdges)
+			nodeBucket := tx.Bucket(bucketNodes)
+
+			c := idxBucket.Cursor()
+			for k, _ := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, _ = c.Next() {
+				edgeIDBytes := k[len(prefix):]
+				if len(edgeIDBytes) < 8 {
+					continue
+				}
+				edgeID := decodeEdgeID(edgeIDBytes)
+
+				// Read edge data.
+				edgeData := edgeBucket.Get(encodeEdgeID(edgeID))
+				if edgeData == nil {
+					continue
+				}
+				edge, err := decodeEdge(edgeData)
+				if err != nil {
+					continue
+				}
+
+				// Read "a" node (source) — within the same shard tx.
+				aData := nodeBucket.Get(encodeNodeID(edge.From))
+				if aData == nil {
+					continue // source node deleted; skip
+				}
+				aProps, err := decodeProps(aData)
+				if err != nil {
+					continue
+				}
+				aNode := &Node{ID: edge.From, Props: aProps}
+
+				// Read "b" node (target).
+				// For single-shard mode, target is in the same tx.
+				// For multi-shard, the target may be in another shard.
+				var bNode *Node
+				bData := nodeBucket.Get(encodeNodeID(edge.To))
+				if bData != nil {
+					bProps, err := decodeProps(bData)
+					if err == nil {
+						bNode = &Node{ID: edge.To, Props: bProps}
+					}
+				}
+
+				if bNode == nil {
+					// Target node is on a different shard — fetch externally.
+					bNode, err = db.getNode(edge.To)
+					if err != nil {
+						continue
+					}
+				}
+
+				// Apply "b" inline property filter.
+				if !matchProps(bNode.Props, bPat.Props) {
+					continue
+				}
+
+				// Apply WHERE clause.
+				if q.Where != nil {
+					bindings := map[string]any{
+						aVar: aNode,
+						bVar: bNode,
+					}
+					if rVar != "" {
+						bindings[rVar] = edge
+					}
+					ok, err := evalBool(q.Where, bindings)
+					if err != nil {
+						return err
+					}
+					if !ok {
+						continue
+					}
+				}
+
+				rows = append(rows, resultRow{a: aNode, r: edge, b: bNode})
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	return db.projectPatternResults(q, rows, aVar, rVar, bVar)
 }
 
@@ -447,7 +568,40 @@ func (db *DB) projectResults(q *CypherQuery, nodes []*Node, edges []*Edge, nodeV
 		result.Columns = append(result.Columns, returnItemName(item))
 	}
 
-	// Build rows.
+	// ------------------------------------------------------------------
+	// Optimization: ORDER BY + LIMIT → heap-based top-K selection.
+	// Avoids creating N result maps and O(N log N) sort; instead maintains
+	// a heap of K items → O(N log K), and only builds K result maps.
+	// ------------------------------------------------------------------
+	if len(q.OrderBy) > 0 && q.Limit > 0 {
+		h := newTopKHeap(q.OrderBy, q.Limit)
+
+		for _, n := range nodes {
+			bindings := map[string]any{nodeVar: n}
+			sortKey := evalSortKey(q.OrderBy, bindings)
+			h.offer(topKItem{sortKey: sortKey, source: n})
+		}
+
+		// Extract in correct order and build result rows.
+		sorted := h.sorted()
+		for _, item := range sorted {
+			n := item.source.(*Node)
+			bindings := map[string]any{nodeVar: n}
+			row := make(map[string]any)
+			for _, ri := range q.Return.Items {
+				colName := returnItemName(ri)
+				val, err := evalExpr(&ri.Expr, bindings)
+				if err != nil {
+					return nil, err
+				}
+				row[colName] = val
+			}
+			result.Rows = append(result.Rows, row)
+		}
+		return result, nil
+	}
+
+	// Build rows (no ORDER BY + LIMIT fast-path).
 	for _, n := range nodes {
 		bindings := map[string]any{nodeVar: n}
 		row := make(map[string]any)
@@ -462,12 +616,12 @@ func (db *DB) projectResults(q *CypherQuery, nodes []*Node, edges []*Edge, nodeV
 		result.Rows = append(result.Rows, row)
 	}
 
-	// ORDER BY
+	// ORDER BY (without LIMIT — full sort)
 	if len(q.OrderBy) > 0 {
 		sortRows(result.Rows, q.OrderBy)
 	}
 
-	// LIMIT
+	// LIMIT (without ORDER BY already handled by LIMIT push-down)
 	if q.Limit > 0 && len(result.Rows) > q.Limit {
 		result.Rows = result.Rows[:q.Limit]
 	}
@@ -487,6 +641,48 @@ func (db *DB) projectPatternResults(q *CypherQuery, rows []resultRow, aVar, rVar
 
 	for _, item := range q.Return.Items {
 		result.Columns = append(result.Columns, returnItemName(item))
+	}
+
+	// ------------------------------------------------------------------
+	// ORDER BY + LIMIT → heap-based top-K.
+	// ------------------------------------------------------------------
+	if len(q.OrderBy) > 0 && q.Limit > 0 {
+		h := newTopKHeap(q.OrderBy, q.Limit)
+
+		for _, rr := range rows {
+			bindings := map[string]any{
+				aVar: rr.a,
+				bVar: rr.b,
+			}
+			if rVar != "" && rr.r != nil {
+				bindings[rVar] = rr.r
+			}
+			sortKey := evalSortKey(q.OrderBy, bindings)
+			h.offer(topKItem{sortKey: sortKey, source: rr})
+		}
+
+		sorted := h.sorted()
+		for _, item := range sorted {
+			rr := item.source.(resultRow)
+			bindings := map[string]any{
+				aVar: rr.a,
+				bVar: rr.b,
+			}
+			if rVar != "" && rr.r != nil {
+				bindings[rVar] = rr.r
+			}
+			row := make(map[string]any)
+			for _, ri := range q.Return.Items {
+				colName := returnItemName(ri)
+				val, err := evalExpr(&ri.Expr, bindings)
+				if err != nil {
+					return nil, err
+				}
+				row[colName] = val
+			}
+			result.Rows = append(result.Rows, row)
+		}
+		return result, nil
 	}
 
 	for _, rr := range rows {
@@ -519,6 +715,113 @@ func (db *DB) projectPatternResults(q *CypherQuery, rows []resultRow, aVar, rVar
 	}
 
 	return result, nil
+}
+
+// ---------------------------------------------------------------------------
+// Top-K Heap — selects the K best items from a stream using O(N log K) time.
+// ---------------------------------------------------------------------------
+
+// topKItem wraps a sort key and the original source object.
+type topKItem struct {
+	sortKey []any // pre-evaluated ORDER BY values
+	source  any   // *Node or resultRow
+}
+
+// topKHeap implements container/heap.Interface.
+// The root holds the "worst" item among the current top-K set,
+// so it can be cheaply evicted when a better candidate arrives.
+type topKHeap struct {
+	items   []topKItem
+	orderBy []OrderItem
+	limit   int
+}
+
+func newTopKHeap(orderBy []OrderItem, limit int) *topKHeap {
+	return &topKHeap{
+		items:   make([]topKItem, 0, limit),
+		orderBy: orderBy,
+		limit:   limit,
+	}
+}
+
+func (h *topKHeap) Len() int { return len(h.items) }
+
+// Less: the "worst" item (should appear LAST in the final result) goes to root.
+// For DESC: smallest value is worst → min-heap on sort key.
+// For ASC: largest value is worst → max-heap on sort key.
+func (h *topKHeap) Less(i, j int) bool {
+	for idx, oi := range h.orderBy {
+		cmp := compareValues(h.items[i].sortKey[idx], h.items[j].sortKey[idx])
+		if cmp == 0 {
+			continue
+		}
+		if oi.Desc {
+			return cmp < 0 // min-heap: smallest at root (worst for DESC)
+		}
+		return cmp > 0 // max-heap: largest at root (worst for ASC)
+	}
+	return false
+}
+
+func (h *topKHeap) Swap(i, j int) { h.items[i], h.items[j] = h.items[j], h.items[i] }
+
+func (h *topKHeap) Push(x any) { h.items = append(h.items, x.(topKItem)) }
+
+func (h *topKHeap) Pop() any {
+	n := len(h.items)
+	item := h.items[n-1]
+	h.items = h.items[:n-1]
+	return item
+}
+
+// offer adds an item to the heap if it belongs in the top-K.
+func (h *topKHeap) offer(item topKItem) {
+	if len(h.items) < h.limit {
+		heap.Push(h, item)
+		return
+	}
+	// Check if the new item is "better" than the worst (root).
+	if h.isBetter(item.sortKey, h.items[0].sortKey) {
+		h.items[0] = item
+		heap.Fix(h, 0)
+	}
+}
+
+// isBetter returns true if sortKey a should appear before sortKey b
+// in the final result ordering.
+func (h *topKHeap) isBetter(a, b []any) bool {
+	for idx, oi := range h.orderBy {
+		cmp := compareValues(a[idx], b[idx])
+		if cmp == 0 {
+			continue
+		}
+		if oi.Desc {
+			return cmp > 0 // larger is better for DESC
+		}
+		return cmp < 0 // smaller is better for ASC
+	}
+	return false
+}
+
+// sorted extracts all items from the heap in correct result order.
+func (h *topKHeap) sorted() []topKItem {
+	n := len(h.items)
+	result := make([]topKItem, n)
+	// Pop items from heap: they come out "worst first" → reverse.
+	for i := n - 1; i >= 0; i-- {
+		result[i] = heap.Pop(h).(topKItem)
+	}
+	return result
+}
+
+// evalSortKey evaluates all ORDER BY expressions for a given bindings context.
+func evalSortKey(orderBy []OrderItem, bindings map[string]any) []any {
+	key := make([]any, len(orderBy))
+	for i, oi := range orderBy {
+		val, _ := evalExpr(&oi.Expr, bindings)
+		key[i] = val
+	}
+	return key
 }
 
 // returnItemName computes the column name for a return item.

@@ -22,6 +22,7 @@ type DB struct {
 	dir          string
 	shards       []*shard
 	pool         *workerPool
+	cache        queryCache  // Cypher AST cache — avoids re-parsing identical queries
 	mu           sync.Mutex  // only used in Close() to prevent double-close
 	closed       atomic.Bool // atomic flag — checked by every operation without locking
 	indexedProps sync.Map    // map[string]bool — tracks which property names have secondary indexes
