@@ -15,6 +15,7 @@ A high-performance, embeddable graph database written in Go. Built on top of [bb
 - **Batch operations** — `AddNodeBatch` / `AddEdgeBatch` for bulk loading with single-fsync transactions
 - **Worker pool** — built-in goroutine pool for concurrent query execution
 - **Optional sharding** — hash-based partitioning across multiple bbolt files; edges co-located with source nodes for single-shard traversals
+- **Management UI** — built-in web console with a Cypher query editor, interactive graph visualization (cytoscape.js), index management, and a node/edge explorer
 
 ## Installation
 
@@ -308,6 +309,14 @@ fmt.Printf("Nodes: %d, Edges: %d, Shards: %d, Disk: %.1f MB\n",
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
+│                     Management UI                            │
+│   React + TypeScript + Tailwind · cytoscape.js · CodeMirror  │
+│   Query Editor · Dashboard · Indexes · Explorer              │
+├──────────────────────────────────────────────────────────────┤
+│                    HTTP / JSON API                            │
+│   /api/cypher · /api/nodes · /api/edges · /api/indexes       │
+│   /api/stats · CORS · SPA fallback                           │
+├──────────────────────────────────────────────────────────────┤
 │                        Public API                            │
 │   Node CRUD · Edge CRUD · BFS/DFS · Paths · Query Builder   │
 │   Cypher(string) · PrepareCypher · Indexes · Stats           │
@@ -356,6 +365,80 @@ When `ShardCount > 1`, node IDs are hash-partitioned (`nodeID % shardCount`) acr
 - Cross-shard edge creation uses two separate transactions (two fsyncs) instead of one.
 
 For most use cases, `ShardCount: 1` (default) is sufficient and avoids cross-shard overhead.
+
+## Management UI
+
+GraphDB ships with a built-in web-based management console for exploring your data visually.
+
+### Running the UI
+
+```bash
+# Build the React frontend (one-time)
+cd ui && npm install && npm run build && cd ..
+
+# Start the server (serves both the API and the UI)
+go run ./cmd/graphdb-ui/ -db ./my-data.db -ui ./ui/dist
+# → Open http://localhost:7474
+```
+
+For development with hot-reload:
+
+```bash
+# Terminal 1 — Go API server
+go run ./cmd/graphdb-ui/ -db ./my-data.db
+
+# Terminal 2 — React dev server (auto-proxies API calls)
+cd ui && npm run dev
+# → Open http://localhost:5173
+```
+
+### Pages
+
+| Page | What it does |
+|---|---|
+| **Query Editor** | Write and run Cypher queries with syntax highlighting. Results are shown as a table or as an interactive graph. Includes example queries and keeps a history of past queries. Press `Ctrl+Enter` to execute. |
+| **Dashboard** | See your database at a glance — total nodes, edges, shard count, disk usage, and which indexes are active. Quick links to other pages. |
+| **Index Management** | Create, drop, or rebuild property indexes through the UI. Each index is shown with its type (B+tree) and status. |
+| **Graph Explorer** | Browse all nodes in a paginated list. Click any node to see its properties and a visual graph of its direct connections. Click nodes in the graph to navigate and explore further. |
+
+### REST API
+
+The UI communicates through a JSON API that you can also use directly:
+
+```bash
+# Database stats
+curl http://localhost:7474/api/stats
+
+# Run a Cypher query
+curl -X POST http://localhost:7474/api/cypher \
+  -d '{"query": "MATCH (n) RETURN n LIMIT 10"}'
+
+# List indexes
+curl http://localhost:7474/api/indexes
+
+# Create an index
+curl -X POST http://localhost:7474/api/indexes \
+  -d '{"property": "name"}'
+
+# List nodes (paginated)
+curl http://localhost:7474/api/nodes?limit=20&offset=0
+
+# Get a node's neighborhood (node + neighbors + edges)
+curl http://localhost:7474/api/nodes/1/neighborhood
+
+# Create a node
+curl -X POST http://localhost:7474/api/nodes \
+  -d '{"props": {"name": "Alice", "age": 30}}'
+
+# Create an edge
+curl -X POST http://localhost:7474/api/edges \
+  -d '{"from": 1, "to": 2, "label": "follows"}'
+```
+
+### Tech Stack
+
+- **Frontend**: React 18, TypeScript, Vite, Tailwind CSS, [cytoscape.js](https://js.cytoscape.org/) (graph rendering), [CodeMirror](https://codemirror.net/) (query editor), [Lucide](https://lucide.dev/) (icons)
+- **Backend**: Go `net/http` with the standard library router (Go 1.22+), no external web framework
 
 ## Examples
 
