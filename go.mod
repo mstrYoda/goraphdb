@@ -1,4 +1,4 @@
-module github.com/emre-savci/graphdb
+module github.com/mstrYoda/graphdb
 
 go 1.24.3
 

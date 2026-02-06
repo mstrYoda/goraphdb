@@ -19,7 +19,7 @@ A high-performance, embeddable graph database written in Go. Built on top of [bb
 ## Installation
 
 ```bash
-go get github.com/emre-savci/graphdb
+go get github.com/mstrYoda/graphdb
 ```
 
 ## Quick Start
@@ -31,7 +31,7 @@ import (
     "fmt"
     "log"
 
-    graphdb "github.com/emre-savci/graphdb"
+    graphdb "github.com/mstrYoda/graphdb"
 )
 
 func main() {

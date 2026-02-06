@@ -15,7 +15,7 @@ import (
 	"os"
 	"time"
 
-	graphdb "github.com/emre-savci/graphdb"
+	graphdb "github.com/mstrYoda/graphdb"
 )
 
 func main() {

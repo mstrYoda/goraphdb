@@ -12,7 +12,7 @@ import (
 	"log"
 	"os"
 
-	graphdb "github.com/emre-savci/graphdb"
+	graphdb "github.com/mstrYoda/graphdb"
 )
 
 func main() {
