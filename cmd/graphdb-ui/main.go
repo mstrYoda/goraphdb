@@ -12,8 +12,8 @@ import (
 	"log"
 	"net/http"
 
-	graphdb "github.com/mstrYoda/graphdb"
-	"github.com/mstrYoda/graphdb/server"
+	graphdb "github.com/mstrYoda/goraphdb"
+	"github.com/mstrYoda/goraphdb/server"
 )
 
 func main() {

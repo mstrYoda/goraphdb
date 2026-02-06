@@ -1,4 +1,4 @@
-module github.com/mstrYoda/graphdb
+module github.com/mstrYoda/goraphdb
 
 go 1.24.3
 

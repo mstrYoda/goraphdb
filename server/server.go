@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	graphdb "github.com/mstrYoda/graphdb"
+	graphdb "github.com/mstrYoda/goraphdb"
 )
 
 // ---------------------------------------------------------------------------

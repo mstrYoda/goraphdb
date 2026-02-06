@@ -22,7 +22,7 @@ A high-performance, embeddable graph database written in Go. Built on top of [bb
 ## Installation
 
 ```bash
-go get github.com/mstrYoda/graphdb
+go get github.com/mstrYoda/goraphdb
 ```
 
 ## Quick Start
@@ -34,7 +34,7 @@ import (
     "fmt"
     "log"
 
-    graphdb "github.com/mstrYoda/graphdb"
+    graphdb "github.com/mstrYoda/goraphdb"
 )
 
 func main() {
