@@ -189,14 +189,83 @@ func (db *DB) AddEdgeBatch(edges []Edge) ([]EdgeID, error) {
 		return ids, nil
 	}
 
-	// Multi-shard: process one edge at a time (each edge may span two shards).
-	for i := range edges {
-		id, err := db.AddEdge(edges[i].From, edges[i].To, edges[i].Label, edges[i].Props)
-		if err != nil {
-			return nil, fmt.Errorf("graphdb: batch edge add failed at index %d: %w", i, err)
-		}
-		ids[i] = id
+	// Multi-shard: group edges by source/destination shard for batched transactions.
+	// This avoids the O(N * fsync) cost of calling AddEdge individually.
+
+	type adjInEntry struct {
+		to     NodeID
+		edgeID EdgeID
+		from   NodeID
+		label  string
 	}
+	srcGroups := make(map[*shard][]*Edge)
+	dstGroups := make(map[*shard][]adjInEntry)
+
+	for i := range edges {
+		id := db.primaryShard().allocEdgeID()
+		ids[i] = id
+		edges[i].ID = id
+
+		srcShard := db.shardForEdge(edges[i].From)
+		dstShard := db.shardFor(edges[i].To)
+
+		srcGroups[srcShard] = append(srcGroups[srcShard], &edges[i])
+		dstGroups[dstShard] = append(dstGroups[dstShard], adjInEntry{
+			to: edges[i].To, edgeID: id, from: edges[i].From, label: edges[i].Label,
+		})
+	}
+
+	// Step 1: write edge data + adj_out + edge-type index per source shard.
+	for s, batch := range srcGroups {
+		err := s.db.Update(func(tx *bolt.Tx) error {
+			edgeBucket := tx.Bucket(bucketEdges)
+			adjOutBucket := tx.Bucket(bucketAdjOut)
+			idxBucket := tx.Bucket(bucketIdxEdgeTyp)
+
+			for _, e := range batch {
+				edgeData, err := encodeEdge(e)
+				if err != nil {
+					return err
+				}
+				if err := edgeBucket.Put(encodeEdgeID(e.ID), edgeData); err != nil {
+					return err
+				}
+				if err := adjOutBucket.Put(
+					encodeAdjKey(e.From, e.ID), encodeAdjValue(e.To, e.Label),
+				); err != nil {
+					return err
+				}
+				if err := idxBucket.Put(encodeIndexKey(e.Label, uint64(e.ID)), nil); err != nil {
+					return err
+				}
+			}
+			s.edgeCount.Add(uint64(len(batch)))
+			return nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("graphdb: batch edge add failed: %w", err)
+		}
+	}
+
+	// Step 2: write adj_in entries per destination shard.
+	for s, batch := range dstGroups {
+		err := s.db.Update(func(tx *bolt.Tx) error {
+			adjInBucket := tx.Bucket(bucketAdjIn)
+			for _, entry := range batch {
+				if err := adjInBucket.Put(
+					encodeAdjKey(entry.to, entry.edgeID),
+					encodeAdjValue(entry.from, entry.label),
+				); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("graphdb: batch edge add failed (adj_in): %w", err)
+		}
+	}
+
 	return ids, nil
 }
 
