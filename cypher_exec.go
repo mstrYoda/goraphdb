@@ -1,0 +1,710 @@
+package graphdb
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+)
+
+// --------------------------------------------------------------------------
+// Cypher Executor — runs a parsed CypherQuery against the graph database.
+//
+// Public API:
+//   result, err := db.Cypher("MATCH (a {name: 'Alice'})-[:FOLLOWS]->(b) RETURN b")
+//   for _, row := range result.Rows { ... }
+// --------------------------------------------------------------------------
+
+// CypherResult holds the result of a Cypher query execution.
+type CypherResult struct {
+	Columns []string         // column names in RETURN order
+	Rows    []map[string]any // each row is a map of column→value
+}
+
+// Cypher parses and executes a Cypher query string against the database.
+// Safe for concurrent use.
+func (db *DB) Cypher(query string) (*CypherResult, error) {
+	if db.isClosed() {
+		return nil, fmt.Errorf("graphdb: database is closed")
+	}
+
+	ast, err := parseCypher(query)
+	if err != nil {
+		return nil, err
+	}
+
+	return db.executeCypher(ast)
+}
+
+// executeCypher runs a parsed AST against the database.
+func (db *DB) executeCypher(q *CypherQuery) (*CypherResult, error) {
+	pat := q.Match.Pattern
+
+	// Determine the execution strategy based on pattern shape.
+	switch {
+	case len(pat.Nodes) == 1 && len(pat.Rels) == 0:
+		// Simple node match: MATCH (n) or MATCH (n {prop: val})
+		return db.execNodeMatch(q)
+
+	case len(pat.Nodes) == 2 && len(pat.Rels) == 1:
+		// Single-hop pattern: MATCH (a)-[r:LABEL]->(b)
+		rel := pat.Rels[0]
+		if rel.VarLength {
+			return db.execVarLengthMatch(q)
+		}
+		return db.execSingleHopMatch(q)
+
+	default:
+		return nil, fmt.Errorf("cypher exec: unsupported pattern with %d nodes and %d relationships",
+			len(pat.Nodes), len(pat.Rels))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Strategy 1: Simple node match — MATCH (n) / MATCH (n {name: "Alice"})
+// ---------------------------------------------------------------------------
+
+func (db *DB) execNodeMatch(q *CypherQuery) (*CypherResult, error) {
+	nodePat := q.Match.Pattern.Nodes[0]
+	varName := nodePat.Variable
+	if varName == "" {
+		varName = "_n" // anonymous
+	}
+
+	// Collect matching nodes.
+	var nodes []*Node
+	err := db.forEachNode(func(n *Node) error {
+		// Inline property filter.
+		if !matchProps(n.Props, nodePat.Props) {
+			return nil
+		}
+		// WHERE clause filter.
+		if q.Where != nil {
+			bindings := map[string]any{varName: n}
+			ok, err := evalBool(q.Where, bindings)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return nil
+			}
+		}
+		nodes = append(nodes, n)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return db.projectResults(q, nodes, nil, varName, "")
+}
+
+// ---------------------------------------------------------------------------
+// Strategy 2: Single-hop pattern — MATCH (a)-[r:LABEL]->(b)
+// ---------------------------------------------------------------------------
+
+func (db *DB) execSingleHopMatch(q *CypherQuery) (*CypherResult, error) {
+	pat := q.Match.Pattern
+	aPat := pat.Nodes[0]
+	rel := pat.Rels[0]
+	bPat := pat.Nodes[1]
+
+	aVar := aPat.Variable
+	if aVar == "" {
+		aVar = "_a"
+	}
+	bVar := bPat.Variable
+	if bVar == "" {
+		bVar = "_b"
+	}
+	rVar := rel.Variable // may be ""
+
+	// Step 1: Find all candidate "a" nodes.
+	aCandidates, err := db.findCandidates(aPat)
+	if err != nil {
+		return nil, err
+	}
+
+	// Step 2: For each "a", traverse edges and find matching "b" nodes.
+	var rows []resultRow
+
+	for _, a := range aCandidates {
+		edges, err := db.getEdgesForNode(a.ID, rel.Dir)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, e := range edges {
+			// Filter by edge label if specified.
+			if rel.Label != "" && !strings.EqualFold(e.Label, rel.Label) {
+				continue
+			}
+
+			// Determine the target node.
+			targetID := e.To
+			if rel.Dir == Incoming {
+				targetID = e.From
+			}
+
+			bNode, err := db.getNode(targetID)
+			if err != nil {
+				continue
+			}
+
+			// Apply "b" inline property filter.
+			if !matchProps(bNode.Props, bPat.Props) {
+				continue
+			}
+
+			// Apply WHERE clause.
+			if q.Where != nil {
+				bindings := map[string]any{
+					aVar: a,
+					bVar: bNode,
+				}
+				if rVar != "" {
+					bindings[rVar] = e
+				}
+				ok, err := evalBool(q.Where, bindings)
+				if err != nil {
+					return nil, err
+				}
+				if !ok {
+					continue
+				}
+			}
+
+			rows = append(rows, resultRow{a: a, r: e, b: bNode})
+		}
+	}
+
+	// Step 3: Project RETURN items.
+	return db.projectPatternResults(q, rows, aVar, rVar, bVar)
+}
+
+// ---------------------------------------------------------------------------
+// Strategy 3: Variable-length path — MATCH (a)-[:LABEL*min..max]->(b)
+// ---------------------------------------------------------------------------
+
+func (db *DB) execVarLengthMatch(q *CypherQuery) (*CypherResult, error) {
+	pat := q.Match.Pattern
+	aPat := pat.Nodes[0]
+	rel := pat.Rels[0]
+	bPat := pat.Nodes[1]
+
+	aVar := aPat.Variable
+	if aVar == "" {
+		aVar = "_a"
+	}
+	bVar := bPat.Variable
+	if bVar == "" {
+		bVar = "_b"
+	}
+
+	// Find starting nodes.
+	aCandidates, err := db.findCandidates(aPat)
+	if err != nil {
+		return nil, err
+	}
+
+	maxDepth := rel.MaxHops
+	if maxDepth < 0 {
+		maxDepth = 50 // safety cap
+	}
+	minDepth := rel.MinHops
+
+	var rows []resultRow
+
+	for _, a := range aCandidates {
+		// Use BFS to find all reachable nodes within hop range.
+		var edgeFilter EdgeFilter
+		if rel.Label != "" {
+			label := rel.Label
+			edgeFilter = func(e *Edge) bool {
+				return strings.EqualFold(e.Label, label)
+			}
+		}
+
+		err := db.BFS(a.ID, maxDepth, rel.Dir, edgeFilter, func(tr *TraversalResult) bool {
+			if tr.Depth < minDepth {
+				return true // continue, not deep enough yet
+			}
+
+			bNode := tr.Node
+
+			// Apply "b" inline property filter.
+			if !matchProps(bNode.Props, bPat.Props) {
+				return true
+			}
+
+			// Apply WHERE clause.
+			if q.Where != nil {
+				bindings := map[string]any{
+					aVar: a,
+					bVar: bNode,
+				}
+				ok, _ := evalBool(q.Where, bindings)
+				if !ok {
+					return true
+				}
+			}
+
+			rows = append(rows, resultRow{a: a, b: bNode})
+			return true
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return db.projectPatternResults(q, rows, aVar, "", bVar)
+}
+
+// ---------------------------------------------------------------------------
+// Candidate finding
+// ---------------------------------------------------------------------------
+
+// findCandidates finds all nodes matching a NodePattern's inline properties.
+func (db *DB) findCandidates(np NodePattern) ([]*Node, error) {
+	if len(np.Props) == 0 {
+		// No inline filter → all nodes.
+		var nodes []*Node
+		err := db.forEachNode(func(n *Node) error {
+			nodes = append(nodes, n)
+			return nil
+		})
+		return nodes, err
+	}
+
+	// Filter by inline props.
+	return db.FindNodes(func(n *Node) bool {
+		return matchProps(n.Props, np.Props)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Result projection
+// ---------------------------------------------------------------------------
+
+// projectResults handles RETURN / ORDER BY / LIMIT for simple node matches.
+func (db *DB) projectResults(q *CypherQuery, nodes []*Node, edges []*Edge, nodeVar, edgeVar string) (*CypherResult, error) {
+	result := &CypherResult{}
+
+	// Build column names.
+	for _, item := range q.Return.Items {
+		result.Columns = append(result.Columns, returnItemName(item))
+	}
+
+	// Build rows.
+	for _, n := range nodes {
+		bindings := map[string]any{nodeVar: n}
+		row := make(map[string]any)
+		for _, item := range q.Return.Items {
+			colName := returnItemName(item)
+			val, err := evalExpr(&item.Expr, bindings)
+			if err != nil {
+				return nil, err
+			}
+			row[colName] = val
+		}
+		result.Rows = append(result.Rows, row)
+	}
+
+	// ORDER BY
+	if len(q.OrderBy) > 0 {
+		sortRows(result.Rows, q.OrderBy)
+	}
+
+	// LIMIT
+	if q.Limit > 0 && len(result.Rows) > q.Limit {
+		result.Rows = result.Rows[:q.Limit]
+	}
+
+	return result, nil
+}
+
+// projectPatternResults handles RETURN for pattern matches (a)-[r]->(b).
+type resultRow struct {
+	a *Node
+	r *Edge // may be nil (var-length paths)
+	b *Node
+}
+
+func (db *DB) projectPatternResults(q *CypherQuery, rows []resultRow, aVar, rVar, bVar string) (*CypherResult, error) {
+	result := &CypherResult{}
+
+	for _, item := range q.Return.Items {
+		result.Columns = append(result.Columns, returnItemName(item))
+	}
+
+	for _, rr := range rows {
+		bindings := map[string]any{
+			aVar: rr.a,
+			bVar: rr.b,
+		}
+		if rVar != "" && rr.r != nil {
+			bindings[rVar] = rr.r
+		}
+
+		row := make(map[string]any)
+		for _, item := range q.Return.Items {
+			colName := returnItemName(item)
+			val, err := evalExpr(&item.Expr, bindings)
+			if err != nil {
+				return nil, err
+			}
+			row[colName] = val
+		}
+		result.Rows = append(result.Rows, row)
+	}
+
+	if len(q.OrderBy) > 0 {
+		sortRows(result.Rows, q.OrderBy)
+	}
+
+	if q.Limit > 0 && len(result.Rows) > q.Limit {
+		result.Rows = result.Rows[:q.Limit]
+	}
+
+	return result, nil
+}
+
+// returnItemName computes the column name for a return item.
+func returnItemName(item ReturnItem) string {
+	if item.Alias != "" {
+		return item.Alias
+	}
+	return exprName(item.Expr)
+}
+
+// exprName returns a readable name for an expression (used as column name).
+func exprName(e Expression) string {
+	switch e.Kind {
+	case ExprVarRef:
+		return e.Variable
+	case ExprPropAccess:
+		return e.Object + "." + e.Property
+	case ExprFuncCall:
+		args := make([]string, len(e.Args))
+		for i, a := range e.Args {
+			args[i] = exprName(a)
+		}
+		return e.FuncName + "(" + strings.Join(args, ", ") + ")"
+	default:
+		return "expr"
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Expression evaluation
+// ---------------------------------------------------------------------------
+
+// evalExpr evaluates an expression against a set of variable bindings.
+func evalExpr(e *Expression, bindings map[string]any) (any, error) {
+	switch e.Kind {
+	case ExprLiteral:
+		return e.LitValue, nil
+
+	case ExprVarRef:
+		val, ok := bindings[e.Variable]
+		if !ok {
+			return nil, fmt.Errorf("cypher exec: unbound variable %q", e.Variable)
+		}
+		return val, nil
+
+	case ExprPropAccess:
+		obj, ok := bindings[e.Object]
+		if !ok {
+			return nil, fmt.Errorf("cypher exec: unbound variable %q", e.Object)
+		}
+		return getProperty(obj, e.Property), nil
+
+	case ExprFuncCall:
+		return evalFunc(e.FuncName, e.Args, bindings)
+
+	case ExprComparison:
+		return evalComparison(e, bindings)
+
+	case ExprAnd:
+		for _, op := range e.Operands {
+			v, err := evalBool(&op, bindings)
+			if err != nil {
+				return nil, err
+			}
+			if !v {
+				return false, nil
+			}
+		}
+		return true, nil
+
+	case ExprOr:
+		for _, op := range e.Operands {
+			v, err := evalBool(&op, bindings)
+			if err != nil {
+				return nil, err
+			}
+			if v {
+				return true, nil
+			}
+		}
+		return false, nil
+
+	case ExprNot:
+		v, err := evalBool(e.Inner, bindings)
+		if err != nil {
+			return nil, err
+		}
+		return !v, nil
+
+	default:
+		return nil, fmt.Errorf("cypher exec: unsupported expression kind %d", e.Kind)
+	}
+}
+
+// evalBool evaluates an expression and coerces the result to bool.
+func evalBool(e *Expression, bindings map[string]any) (bool, error) {
+	val, err := evalExpr(e, bindings)
+	if err != nil {
+		return false, err
+	}
+	return toBool(val), nil
+}
+
+// evalComparison evaluates a comparison expression.
+func evalComparison(e *Expression, bindings map[string]any) (any, error) {
+	left, err := evalExpr(e.Left, bindings)
+	if err != nil {
+		return nil, err
+	}
+	right, err := evalExpr(e.Right, bindings)
+	if err != nil {
+		return nil, err
+	}
+
+	cmp := compareValues(left, right)
+
+	switch e.Op {
+	case OpEq:
+		return cmp == 0, nil
+	case OpNeq:
+		return cmp != 0, nil
+	case OpLt:
+		return cmp < 0, nil
+	case OpGt:
+		return cmp > 0, nil
+	case OpLte:
+		return cmp <= 0, nil
+	case OpGte:
+		return cmp >= 0, nil
+	default:
+		return false, nil
+	}
+}
+
+// evalFunc evaluates a built-in function call.
+func evalFunc(name string, args []Expression, bindings map[string]any) (any, error) {
+	switch strings.ToLower(name) {
+	case "type":
+		if len(args) != 1 {
+			return nil, fmt.Errorf("cypher exec: type() requires exactly 1 argument")
+		}
+		val, err := evalExpr(&args[0], bindings)
+		if err != nil {
+			return nil, err
+		}
+		if e, ok := val.(*Edge); ok {
+			return e.Label, nil
+		}
+		return nil, nil
+
+	case "id":
+		if len(args) != 1 {
+			return nil, fmt.Errorf("cypher exec: id() requires exactly 1 argument")
+		}
+		val, err := evalExpr(&args[0], bindings)
+		if err != nil {
+			return nil, err
+		}
+		switch v := val.(type) {
+		case *Node:
+			return int64(v.ID), nil
+		case *Edge:
+			return int64(v.ID), nil
+		}
+		return nil, nil
+
+	default:
+		return nil, fmt.Errorf("cypher exec: unknown function %q", name)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Property access helpers
+// ---------------------------------------------------------------------------
+
+// getProperty extracts a property from a Node or Edge.
+func getProperty(obj any, prop string) any {
+	switch v := obj.(type) {
+	case *Node:
+		if v.Props != nil {
+			return v.Props[prop]
+		}
+	case *Edge:
+		// Built-in edge properties.
+		switch prop {
+		case "label", "type":
+			return v.Label
+		default:
+			if v.Props != nil {
+				return v.Props[prop]
+			}
+		}
+	}
+	return nil
+}
+
+// matchProps checks whether a node's properties match all constraints.
+func matchProps(actual Props, constraints map[string]any) bool {
+	if constraints == nil {
+		return true
+	}
+	for key, expected := range constraints {
+		actual, ok := actual[key]
+		if !ok {
+			return false
+		}
+		if compareValues(actual, expected) != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// ---------------------------------------------------------------------------
+// Value comparison & coercion
+// ---------------------------------------------------------------------------
+
+// toFloat64 attempts to convert a value to float64 for numeric comparisons.
+func toFloat64(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case float32:
+		return float64(n), true
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case int32:
+		return float64(n), true
+	case uint64:
+		return float64(n), true
+	}
+	return 0, false
+}
+
+// compareValues compares two arbitrary values. Returns -1, 0, or 1.
+func compareValues(a, b any) int {
+	// nil handling
+	if a == nil && b == nil {
+		return 0
+	}
+	if a == nil {
+		return -1
+	}
+	if b == nil {
+		return 1
+	}
+
+	// Numeric comparison.
+	af, aOk := toFloat64(a)
+	bf, bOk := toFloat64(b)
+	if aOk && bOk {
+		switch {
+		case af < bf:
+			return -1
+		case af > bf:
+			return 1
+		default:
+			return 0
+		}
+	}
+
+	// String comparison.
+	as, aStr := a.(string)
+	bs, bStr := b.(string)
+	if aStr && bStr {
+		return strings.Compare(as, bs)
+	}
+
+	// Bool comparison.
+	ab, aBool := a.(bool)
+	bb, bBool := b.(bool)
+	if aBool && bBool {
+		if ab == bb {
+			return 0
+		}
+		if !ab {
+			return -1
+		}
+		return 1
+	}
+
+	// Fallback: compare string representations.
+	return strings.Compare(fmt.Sprint(a), fmt.Sprint(b))
+}
+
+// toBool coerces a value to bool.
+func toBool(v any) bool {
+	if v == nil {
+		return false
+	}
+	switch b := v.(type) {
+	case bool:
+		return b
+	case int64:
+		return b != 0
+	case float64:
+		return b != 0
+	case string:
+		return b != ""
+	}
+	return true
+}
+
+// ---------------------------------------------------------------------------
+// Sorting
+// ---------------------------------------------------------------------------
+
+func sortRows(rows []map[string]any, orderItems []OrderItem) {
+	sort.SliceStable(rows, func(i, j int) bool {
+		for _, oi := range orderItems {
+			vi := evalRowExpr(&oi.Expr, rows[i])
+			vj := evalRowExpr(&oi.Expr, rows[j])
+			cmp := compareValues(vi, vj)
+			if cmp == 0 {
+				continue
+			}
+			if oi.Desc {
+				return cmp > 0
+			}
+			return cmp < 0
+		}
+		return false
+	})
+}
+
+// evalRowExpr evaluates an expression directly against a result row.
+// For ORDER BY, the row keys are column names — we try to match by name.
+func evalRowExpr(e *Expression, row map[string]any) any {
+	name := exprName(*e)
+	if v, ok := row[name]; ok {
+		return v
+	}
+	// Fallback: if the expression is a prop access like "n.age", look it up.
+	if e.Kind == ExprPropAccess {
+		if obj, ok := row[e.Object]; ok {
+			return getProperty(obj, e.Property)
+		}
+	}
+	return nil
+}
