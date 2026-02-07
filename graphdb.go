@@ -24,6 +24,7 @@ type DB struct {
 	shards       []*shard
 	pool         *workerPool
 	cache        queryCache   // Cypher AST cache — avoids re-parsing identical queries
+	ncache       *nodeCache   // LRU hot-node cache — avoids repeated bbolt lookups
 	log          *slog.Logger // structured logger for all operations
 	mu           sync.Mutex   // only used in Close() to prevent double-close
 	closed       atomic.Bool  // atomic flag — checked by every operation without locking
@@ -52,6 +53,7 @@ func Open(dir string, opts Options) (*DB, error) {
 		opts:   opts,
 		dir:    dir,
 		shards: make([]*shard, opts.ShardCount),
+		ncache: newNodeCache(opts.CacheSize),
 		log:    logger,
 	}
 
@@ -79,6 +81,7 @@ func Open(dir string, opts Options) (*DB, error) {
 		"dir", dir,
 		"shards", opts.ShardCount,
 		"workers", opts.WorkerPoolSize,
+		"node_cache_capacity", opts.CacheSize,
 	)
 
 	return db, nil

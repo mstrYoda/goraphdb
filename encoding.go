@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"hash/crc32"
 
 	"github.com/vmihailenco/msgpack/v5"
 )
@@ -98,12 +99,17 @@ func encodeIndexPrefix(prefix string) []byte {
 	return buf
 }
 
-// propsMagic is a 1-byte prefix that distinguishes MessagePack-encoded
-// properties from legacy JSON-encoded properties. Any data that does NOT
-// start with this byte is assumed to be JSON (backward compatibility).
-const propsMagic byte = 0x01
+// Magic bytes for property encoding format detection.
+const (
+	propsMagic    byte = 0x01 // MessagePack without checksum (v1)
+	propsMagicCRC byte = 0x02 // MessagePack with CRC32 checksum (v2)
+)
 
-// encodeProps serializes properties to MessagePack with a magic-byte prefix.
+// crc32Table is the precomputed Castagnoli CRC32 table (hardware-accelerated on modern CPUs).
+var crc32Table = crc32.MakeTable(crc32.Castagnoli)
+
+// encodeProps serializes properties to MessagePack with a CRC32 checksum.
+// Format: magic(1) + msgpack_data + crc32(4)
 func encodeProps(props Props) ([]byte, error) {
 	if props == nil {
 		props = make(Props)
@@ -112,18 +118,37 @@ func encodeProps(props Props) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	buf := make([]byte, 1+len(raw))
-	buf[0] = propsMagic
+	// magic(1) + data(N) + crc32(4)
+	buf := make([]byte, 1+len(raw)+4)
+	buf[0] = propsMagicCRC
 	copy(buf[1:], raw)
+	checksum := crc32.Checksum(buf[:1+len(raw)], crc32Table)
+	binary.BigEndian.PutUint32(buf[1+len(raw):], checksum)
 	return buf, nil
 }
 
 // decodeProps deserializes properties. It auto-detects the format:
-//   - If the first byte is propsMagic → MessagePack (new format)
+//   - 0x02 → MessagePack with CRC32 checksum (current)
+//   - 0x01 → MessagePack without checksum (legacy v1)
 //   - Otherwise → JSON (legacy data written before the encoding upgrade)
 func decodeProps(data []byte) (Props, error) {
 	var props Props
-	if len(data) > 0 && data[0] == propsMagic {
+	if len(data) > 0 && data[0] == propsMagicCRC {
+		// CRC32-protected msgpack.
+		if len(data) < 5 {
+			return nil, fmt.Errorf("graphdb: props data too short for checksum")
+		}
+		payload := data[:len(data)-4]
+		stored := binary.BigEndian.Uint32(data[len(data)-4:])
+		actual := crc32.Checksum(payload, crc32Table)
+		if stored != actual {
+			return nil, fmt.Errorf("graphdb: props checksum mismatch (stored=%08x actual=%08x)", stored, actual)
+		}
+		if err := msgpack.Unmarshal(payload[1:], &props); err != nil {
+			return nil, err
+		}
+	} else if len(data) > 0 && data[0] == propsMagic {
+		// Legacy msgpack without checksum.
 		if err := msgpack.Unmarshal(data[1:], &props); err != nil {
 			return nil, err
 		}
@@ -138,7 +163,7 @@ func decodeProps(data []byte) (Props, error) {
 	return props, nil
 }
 
-// encodeEdge serializes an edge to binary: ID(8) + From(8) + To(8) + labelLen(4) + label + propsMsgpack.
+// encodeEdge serializes an edge to binary: ID(8) + From(8) + To(8) + labelLen(4) + label + props + crc32(4).
 // Fixed-size header avoids serialization overhead for the hot fields.
 func encodeEdge(e *Edge) ([]byte, error) {
 	labelBytes := []byte(e.Label)
@@ -147,33 +172,59 @@ func encodeEdge(e *Edge) ([]byte, error) {
 		return nil, err
 	}
 
-	// Header: 8 + 8 + 8 + 4 = 28 bytes fixed, then label, then props JSON.
-	buf := make([]byte, 28+len(labelBytes)+len(propsData))
+	// Header: 8 + 8 + 8 + 4 = 28 bytes fixed, then label, then props, then crc32(4).
+	payloadLen := 28 + len(labelBytes) + len(propsData)
+	buf := make([]byte, payloadLen+4)
 	binary.BigEndian.PutUint64(buf[0:8], uint64(e.ID))
 	binary.BigEndian.PutUint64(buf[8:16], uint64(e.From))
 	binary.BigEndian.PutUint64(buf[16:24], uint64(e.To))
 	binary.BigEndian.PutUint32(buf[24:28], uint32(len(labelBytes)))
 	copy(buf[28:28+len(labelBytes)], labelBytes)
 	copy(buf[28+len(labelBytes):], propsData)
+	checksum := crc32.Checksum(buf[:payloadLen], crc32Table)
+	binary.BigEndian.PutUint32(buf[payloadLen:], checksum)
 	return buf, nil
 }
 
-// decodeEdge deserializes a binary edge.
+// decodeEdge deserializes a binary edge and verifies the CRC32 checksum.
+// Backward compatible: if the CRC32 check fails, falls back to legacy decoding
+// (data written before checksums were introduced).
 func decodeEdge(data []byte) (*Edge, error) {
 	if len(data) < 28 {
 		return nil, fmt.Errorf("graphdb: edge data too short (%d bytes)", len(data))
 	}
-	e := &Edge{
-		ID:   EdgeID(binary.BigEndian.Uint64(data[0:8])),
-		From: NodeID(binary.BigEndian.Uint64(data[8:16])),
-		To:   NodeID(binary.BigEndian.Uint64(data[16:24])),
+
+	// Try CRC32-verified decode first (new format: payload + 4-byte CRC).
+	if len(data) >= 32 {
+		payload := data[:len(data)-4]
+		stored := binary.BigEndian.Uint32(data[len(data)-4:])
+		actual := crc32.Checksum(payload, crc32Table)
+		if stored == actual {
+			return decodeEdgePayload(payload)
+		}
 	}
-	labelLen := int(binary.BigEndian.Uint32(data[24:28]))
-	if 28+labelLen > len(data) {
+
+	// Fallback: legacy edge data without CRC32 trailer.
+	return decodeEdgePayload(data)
+}
+
+// decodeEdgePayload decodes the raw edge payload (without CRC32 trailer).
+func decodeEdgePayload(payload []byte) (*Edge, error) {
+	if len(payload) < 28 {
+		return nil, fmt.Errorf("graphdb: edge payload too short (%d bytes)", len(payload))
+	}
+
+	e := &Edge{
+		ID:   EdgeID(binary.BigEndian.Uint64(payload[0:8])),
+		From: NodeID(binary.BigEndian.Uint64(payload[8:16])),
+		To:   NodeID(binary.BigEndian.Uint64(payload[16:24])),
+	}
+	labelLen := int(binary.BigEndian.Uint32(payload[24:28]))
+	if 28+labelLen > len(payload) {
 		return nil, fmt.Errorf("graphdb: edge data corrupted")
 	}
-	e.Label = string(data[28 : 28+labelLen])
-	propsData := data[28+labelLen:]
+	e.Label = string(payload[28 : 28+labelLen])
+	propsData := payload[28+labelLen:]
 	if len(propsData) > 0 {
 		props, err := decodeProps(propsData)
 		if err != nil {

@@ -40,7 +40,10 @@ const (
 	tokTrue
 	tokFalse
 	tokNull
-	tokType // type() function keyword
+	tokType     // type() function keyword
+	tokExplain  // EXPLAIN
+	tokProfile  // PROFILE
+	tokOptional // OPTIONAL
 
 	// Operators
 	tokEq  // =
@@ -126,6 +129,12 @@ func tokenKindName(k TokenKind) string {
 		return "NULL"
 	case tokType:
 		return "TYPE"
+	case tokExplain:
+		return "EXPLAIN"
+	case tokProfile:
+		return "PROFILE"
+	case tokOptional:
+		return "OPTIONAL"
 	case tokEq:
 		return "="
 	case tokNeq:
@@ -175,22 +184,25 @@ func tokenKindName(k TokenKind) string {
 
 // keywords maps uppercase keyword text to token kind.
 var keywords = map[string]TokenKind{
-	"MATCH":  tokMatch,
-	"WHERE":  tokWhere,
-	"RETURN": tokReturn,
-	"ORDER":  tokOrder,
-	"BY":     tokBy,
-	"LIMIT":  tokLimit,
-	"AND":    tokAnd,
-	"OR":     tokOr,
-	"NOT":    tokNot,
-	"AS":     tokAs,
-	"ASC":    tokAsc,
-	"DESC":   tokDesc,
-	"TRUE":   tokTrue,
-	"FALSE":  tokFalse,
-	"NULL":   tokNull,
-	"TYPE":   tokType,
+	"MATCH":    tokMatch,
+	"WHERE":    tokWhere,
+	"RETURN":   tokReturn,
+	"ORDER":    tokOrder,
+	"BY":       tokBy,
+	"LIMIT":    tokLimit,
+	"AND":      tokAnd,
+	"OR":       tokOr,
+	"NOT":      tokNot,
+	"AS":       tokAs,
+	"ASC":      tokAsc,
+	"DESC":     tokDesc,
+	"TRUE":     tokTrue,
+	"FALSE":    tokFalse,
+	"NULL":     tokNull,
+	"TYPE":     tokType,
+	"EXPLAIN":  tokExplain,
+	"PROFILE":  tokProfile,
+	"OPTIONAL": tokOptional,
 }
 
 // lexer holds the state for tokenising a Cypher string.

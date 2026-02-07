@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	bolt "go.etcd.io/bbolt"
 )
@@ -26,6 +27,7 @@ var errLimitReached = errors.New("graphdb: limit reached")
 type CypherResult struct {
 	Columns []string         // column names in RETURN order
 	Rows    []map[string]any // each row is a map of column→value
+	Plan    *QueryPlan       // non-nil when EXPLAIN or PROFILE was used
 }
 
 // Cypher parses and executes a Cypher query string against the database.
@@ -165,7 +167,46 @@ func resolveExprParams(expr *Expression, params map[string]any) error {
 }
 
 // executeCypher runs a parsed AST against the database.
+// Handles EXPLAIN (plan only) and PROFILE (plan + execution with stats).
 func (db *DB) executeCypher(q *CypherQuery) (*CypherResult, error) {
+	// EXPLAIN: return the plan without executing.
+	if q.Explain == ExplainOnly {
+		plan := buildPlan(q, db)
+		return &CypherResult{
+			Plan: &QueryPlan{Root: plan, Profile: false},
+		}, nil
+	}
+
+	// PROFILE: build plan, execute with timing, attach stats.
+	if q.Explain == ExplainProfile {
+		plan := buildPlan(q, db)
+		start := time.Now()
+
+		// Execute normally (strip explain mode so we don't recurse).
+		normalQ := *q
+		normalQ.Explain = ExplainNone
+		result, err := db.executeCypherNormal(&normalQ)
+		if err != nil {
+			return nil, err
+		}
+
+		elapsed := time.Since(start)
+		annotateProfileStats(plan, len(result.Rows), elapsed)
+
+		result.Plan = &QueryPlan{Root: plan, Profile: true, Result: result}
+		return result, nil
+	}
+
+	return db.executeCypherNormal(q)
+}
+
+// executeCypherNormal is the actual execution engine (no EXPLAIN/PROFILE handling).
+func (db *DB) executeCypherNormal(q *CypherQuery) (*CypherResult, error) {
+	// If there is an OPTIONAL MATCH, handle it with the left-outer-join path.
+	if q.OptionalMatch != nil {
+		return db.execWithOptionalMatch(q)
+	}
+
 	pat := q.Match.Pattern
 
 	// Determine the execution strategy based on pattern shape.
@@ -185,6 +226,17 @@ func (db *DB) executeCypher(q *CypherQuery) (*CypherResult, error) {
 	default:
 		return nil, fmt.Errorf("cypher exec: unsupported pattern with %d nodes and %d relationships",
 			len(pat.Nodes), len(pat.Rels))
+	}
+}
+
+// annotateProfileStats fills in actual row counts and timing on a plan tree.
+func annotateProfileStats(node *PlanNode, totalRows int, elapsed time.Duration) {
+	// Walk the plan tree and set the actual rows/time on the root.
+	// A more sophisticated implementation would instrument each operator separately.
+	node.ActualRows = totalRows
+	node.ElapsedTime = elapsed
+	for _, child := range node.Children {
+		child.ActualRows = totalRows
 	}
 }
 
@@ -525,7 +577,13 @@ func (db *DB) execSingleHopByEdgeType(q *CypherQuery, aPat NodePattern, rel RelP
 				if err != nil {
 					continue
 				}
-				aNode := &Node{ID: edge.From, Props: aProps}
+				aLabels := loadLabels(tx, edge.From)
+				aNode := &Node{ID: edge.From, Labels: aLabels, Props: aProps}
+
+				// Apply "a" label filter.
+				if len(aPat.Labels) > 0 && !matchLabels(aNode.Labels, aPat.Labels) {
+					continue
+				}
 
 				// Read "b" node (target).
 				// For single-shard mode, target is in the same tx.
@@ -535,7 +593,8 @@ func (db *DB) execSingleHopByEdgeType(q *CypherQuery, aPat NodePattern, rel RelP
 				if bData != nil {
 					bProps, err := decodeProps(bData)
 					if err == nil {
-						bNode = &Node{ID: edge.To, Props: bProps}
+						bLabels := loadLabels(tx, edge.To)
+						bNode = &Node{ID: edge.To, Labels: bLabels, Props: bProps}
 					}
 				}
 
@@ -545,6 +604,11 @@ func (db *DB) execSingleHopByEdgeType(q *CypherQuery, aPat NodePattern, rel RelP
 					if err != nil {
 						continue
 					}
+				}
+
+				// Apply "b" label filter.
+				if len(bPat.Labels) > 0 && !matchLabels(bNode.Labels, bPat.Labels) {
+					continue
 				}
 
 				// Apply "b" inline property filter.
@@ -631,6 +695,11 @@ func (db *DB) execVarLengthMatch(q *CypherQuery) (*CypherResult, error) {
 			}
 
 			bNode := tr.Node
+
+			// Apply "b" label filter.
+			if len(bPat.Labels) > 0 && !matchLabels(bNode.Labels, bPat.Labels) {
+				return true
+			}
 
 			// Apply "b" inline property filter.
 			if !matchProps(bNode.Props, bPat.Props) {

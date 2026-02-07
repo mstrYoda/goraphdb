@@ -5,15 +5,27 @@ package graphdb
 // language.  These are produced by the parser and consumed by the executor.
 // --------------------------------------------------------------------------
 
+// ExplainMode controls whether the query is explained, profiled, or executed normally.
+type ExplainMode int
+
+const (
+	ExplainNone    ExplainMode = iota // normal execution
+	ExplainOnly                       // return plan without executing
+	ExplainProfile                    // execute and return plan with stats
+)
+
 // CypherQuery is the top-level AST node for a read query.
 //
-//	MATCH <pattern> [WHERE <expr>] RETURN <items> [ORDER BY <items>] [LIMIT <n>]
+//	[EXPLAIN|PROFILE] MATCH <pattern> [WHERE <expr>] [OPTIONAL MATCH <pattern>] RETURN <items> [ORDER BY <items>] [LIMIT <n>]
 type CypherQuery struct {
-	Match   MatchClause
-	Where   *Expression // nil when there is no WHERE
-	Return  ReturnClause
-	OrderBy []OrderItem // nil when there is no ORDER BY
-	Limit   int         // 0 means no limit
+	Explain       ExplainMode // ExplainNone, ExplainOnly, or ExplainProfile
+	Match         MatchClause
+	Where         *Expression  // nil when there is no WHERE
+	OptionalMatch *MatchClause // nil when there is no OPTIONAL MATCH
+	OptionalWhere *Expression  // nil when there is no WHERE after OPTIONAL MATCH
+	Return        ReturnClause
+	OrderBy       []OrderItem // nil when there is no ORDER BY
+	Limit         int         // 0 means no limit
 }
 
 // MatchClause holds the pattern that follows the MATCH keyword.

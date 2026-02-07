@@ -97,6 +97,15 @@ func (p *parser) match(kind TokenKind) bool {
 func (p *parser) parseQuery() (*CypherQuery, error) {
 	q := &CypherQuery{}
 
+	// Optional EXPLAIN / PROFILE prefix.
+	if p.is(tokExplain) {
+		p.advance()
+		q.Explain = ExplainOnly
+	} else if p.is(tokProfile) {
+		p.advance()
+		q.Explain = ExplainProfile
+	}
+
 	// MATCH
 	if _, err := p.expect(tokMatch); err != nil {
 		return nil, err
@@ -115,6 +124,29 @@ func (p *parser) parseQuery() (*CypherQuery, error) {
 			return nil, err
 		}
 		q.Where = &expr
+	}
+
+	// OPTIONAL MATCH (optional)
+	if p.is(tokOptional) {
+		p.advance()
+		if _, err := p.expect(tokMatch); err != nil {
+			return nil, fmt.Errorf("cypher parser: expected MATCH after OPTIONAL")
+		}
+		optPat, err := p.parsePattern()
+		if err != nil {
+			return nil, err
+		}
+		q.OptionalMatch = &MatchClause{Pattern: optPat}
+
+		// Optional WHERE for the OPTIONAL MATCH.
+		if p.is(tokWhere) {
+			p.advance()
+			expr, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			q.OptionalWhere = &expr
+		}
 	}
 
 	// RETURN

@@ -42,6 +42,7 @@ func (db *DB) AddNode(props Props) (NodeID, error) {
 		return 0, fmt.Errorf("graphdb: failed to add node: %w", err)
 	}
 
+	db.ncache.Put(&Node{ID: id, Props: props})
 	db.log.Debug("node added", "id", id)
 	return id, nil
 }
@@ -146,7 +147,13 @@ func (db *DB) GetNode(id NodeID) (*Node, error) {
 
 // getNode is the lock-free internal version of GetNode.
 // Called by BFS/DFS/ShortestPath etc. which need to call this many times during traversal.
+// Uses the hot-node LRU cache to avoid repeated bbolt lookups.
 func (db *DB) getNode(id NodeID) (*Node, error) {
+	// Fast path: cache hit.
+	if n := db.ncache.Get(id); n != nil {
+		return n, nil
+	}
+
 	s := db.shardFor(id)
 	var node *Node
 
@@ -166,6 +173,11 @@ func (db *DB) getNode(id NodeID) (*Node, error) {
 		node = &Node{ID: id, Labels: labels, Props: props}
 		return nil
 	})
+
+	// Populate cache on successful read.
+	if err == nil && node != nil {
+		db.ncache.Put(node)
+	}
 
 	return node, err
 }
@@ -218,6 +230,7 @@ func (db *DB) UpdateNode(id NodeID, props Props) error {
 	if err != nil {
 		db.log.Error("failed to update node", "id", id, "error", err)
 	} else {
+		db.ncache.Invalidate(id)
 		db.log.Debug("node updated", "id", id)
 	}
 	return err
@@ -263,6 +276,7 @@ func (db *DB) SetNodeProps(id NodeID, props Props) error {
 	if err != nil {
 		db.log.Error("failed to set node props", "id", id, "error", err)
 	} else {
+		db.ncache.Invalidate(id)
 		db.log.Debug("node props set", "id", id)
 	}
 	return err
@@ -322,6 +336,7 @@ func (db *DB) DeleteNode(id NodeID) error {
 	if err != nil {
 		db.log.Error("failed to delete node", "id", id, "error", err)
 	} else {
+		db.ncache.Invalidate(id)
 		db.log.Debug("node deleted", "id", id, "edges_removed", len(edges))
 	}
 	return err
