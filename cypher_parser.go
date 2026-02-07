@@ -187,7 +187,7 @@ func (p *parser) parsePattern() (Pattern, error) {
 	return pat, nil
 }
 
-// parseNodePattern parses: '(' [ident] ['{' propMap '}'] ')'
+// parseNodePattern parses: '(' [ident] [':' label]* ['{' propMap '}'] ')'
 func (p *parser) parseNodePattern() (NodePattern, error) {
 	np := NodePattern{}
 
@@ -198,6 +198,15 @@ func (p *parser) parseNodePattern() (NodePattern, error) {
 	// Optional variable name.
 	if p.is(tokIdent) {
 		np.Variable = p.advance().Text
+	}
+
+	// Optional labels: :Label1:Label2
+	for p.is(tokColon) {
+		p.advance() // consume ':'
+		if !p.is(tokIdent) {
+			return np, fmt.Errorf("cypher parser: expected label name after ':' at position %d", p.cur().Pos)
+		}
+		np.Labels = append(np.Labels, p.advance().Text)
 	}
 
 	// Optional inline properties: { key: value, ... }
@@ -248,10 +257,13 @@ func (p *parser) parsePropMap() (map[string]any, error) {
 	return props, nil
 }
 
-// parseLiteral parses a literal value: string, int, float, true, false, null.
+// parseLiteral parses a literal value: string, int, float, true, false, null, or $param.
 func (p *parser) parseLiteral() (any, error) {
 	t := p.cur()
 	switch t.Kind {
+	case tokParam:
+		p.advance()
+		return paramRef(t.Text), nil
 	case tokString:
 		p.advance()
 		return t.Text, nil
@@ -595,6 +607,12 @@ func (p *parser) parsePrimary() (Expression, error) {
 
 		// plain ident → variable reference
 		return varRefExpr(name), nil
+	}
+
+	// Parameter reference: $paramName
+	if t.Kind == tokParam {
+		p.advance()
+		return Expression{Kind: ExprParam, ParamName: t.Text}, nil
 	}
 
 	// Literal values.

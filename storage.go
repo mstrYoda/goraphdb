@@ -12,14 +12,16 @@ import (
 
 // Bucket names used in bbolt.
 var (
-	bucketMeta       = []byte("meta")
-	bucketNodes      = []byte("nodes")
-	bucketEdges      = []byte("edges")
-	bucketAdjOut     = []byte("adj_out")
-	bucketAdjIn      = []byte("adj_in")
-	bucketIdxLabel   = []byte("idx_label")     // node property "label" index
-	bucketIdxEdgeTyp = []byte("idx_edge_type") // edge label/type index
-	bucketIdxProp    = []byte("idx_prop")      // generic property index
+	bucketMeta         = []byte("meta")
+	bucketNodes        = []byte("nodes")
+	bucketEdges        = []byte("edges")
+	bucketAdjOut       = []byte("adj_out")
+	bucketAdjIn        = []byte("adj_in")
+	bucketIdxLabel     = []byte("idx_label")      // node property "label" index (legacy)
+	bucketIdxEdgeTyp   = []byte("idx_edge_type")  // edge label/type index
+	bucketIdxProp      = []byte("idx_prop")       // generic property index
+	bucketNodeLabels   = []byte("node_labels")    // nodeID → msgpack []string (per-node labels)
+	bucketIdxNodeLabel = []byte("idx_node_label") // "Label\x00" + nodeID → nil (label→node index)
 
 	// Meta keys
 	metaNextNodeID = []byte("next_node_id")
@@ -38,6 +40,8 @@ var allBuckets = [][]byte{
 	bucketIdxLabel,
 	bucketIdxEdgeTyp,
 	bucketIdxProp,
+	bucketNodeLabels,
+	bucketIdxNodeLabel,
 }
 
 // shard represents a single bbolt database file (a partition of the graph).

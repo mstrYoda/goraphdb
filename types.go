@@ -3,6 +3,7 @@ package graphdb
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 )
 
 // NodeID uniquely identifies a node in the graph.
@@ -28,8 +29,9 @@ const (
 
 // Node represents a vertex in the graph with arbitrary properties.
 type Node struct {
-	ID    NodeID `json:"id"`
-	Props Props  `json:"props,omitempty"`
+	ID     NodeID   `json:"id"`
+	Labels []string `json:"labels,omitempty"`
+	Props  Props    `json:"props,omitempty"`
 }
 
 // Get returns a property value by key, with an existence flag.
@@ -119,6 +121,9 @@ type Options struct {
 	// MmapSize is the initial mmap size for the database file in bytes.
 	// Larger values improve performance for large datasets. Default: 256MB.
 	MmapSize int
+	// Logger is the structured logger for all database operations.
+	// If nil, slog.Default() is used.
+	Logger *slog.Logger
 }
 
 // DefaultOptions returns sensible defaults for a ~50GB graph database.
@@ -135,8 +140,8 @@ func DefaultOptions() Options {
 
 // GraphStats holds database statistics.
 type GraphStats struct {
-	NodeCount  uint64 `json:"node_count"`
-	EdgeCount  uint64 `json:"edge_count"`
-	ShardCount int    `json:"shard_count"`
+	NodeCount     uint64 `json:"node_count"`
+	EdgeCount     uint64 `json:"edge_count"`
+	ShardCount    int    `json:"shard_count"`
 	DiskSizeBytes int64  `json:"disk_size_bytes"`
 }

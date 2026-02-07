@@ -3,6 +3,7 @@ package graphdb
 import (
 	"bytes"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -22,10 +23,11 @@ type DB struct {
 	dir          string
 	shards       []*shard
 	pool         *workerPool
-	cache        queryCache  // Cypher AST cache — avoids re-parsing identical queries
-	mu           sync.Mutex  // only used in Close() to prevent double-close
-	closed       atomic.Bool // atomic flag — checked by every operation without locking
-	indexedProps sync.Map    // map[string]bool — tracks which property names have secondary indexes
+	cache        queryCache   // Cypher AST cache — avoids re-parsing identical queries
+	log          *slog.Logger // structured logger for all operations
+	mu           sync.Mutex   // only used in Close() to prevent double-close
+	closed       atomic.Bool  // atomic flag — checked by every operation without locking
+	indexedProps sync.Map     // map[string]bool — tracks which property names have secondary indexes
 }
 
 // Open creates or opens a graph database at the given directory path.
@@ -41,10 +43,16 @@ func Open(dir string, opts Options) (*DB, error) {
 		opts.CacheSize = 100_000
 	}
 
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+
 	db := &DB{
 		opts:   opts,
 		dir:    dir,
 		shards: make([]*shard, opts.ShardCount),
+		log:    logger,
 	}
 
 	// Open all shards.
@@ -66,6 +74,12 @@ func Open(dir string, opts Options) (*DB, error) {
 
 	// Discover existing property indexes from disk (survives restart).
 	db.discoverIndexes()
+
+	db.log.Info("database opened",
+		"dir", dir,
+		"shards", opts.ShardCount,
+		"workers", opts.WorkerPoolSize,
+	)
 
 	return db, nil
 }
@@ -129,6 +143,12 @@ func (db *DB) Close() error {
 				firstErr = err
 			}
 		}
+	}
+
+	if firstErr != nil {
+		db.log.Error("database closed with error", "error", firstErr)
+	} else {
+		db.log.Info("database closed")
 	}
 
 	return firstErr

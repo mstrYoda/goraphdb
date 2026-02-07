@@ -35,6 +35,7 @@ func main() {
 
 	opts := graphdb.DefaultOptions()
 	opts.WorkerPoolSize = 8
+	opts.ShardCount = 4
 
 	db, err := graphdb.Open(dbPath, opts)
 	if err != nil {

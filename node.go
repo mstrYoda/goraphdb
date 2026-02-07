@@ -38,9 +38,11 @@ func (db *DB) AddNode(props Props) (NodeID, error) {
 		return nil
 	})
 	if err != nil {
+		db.log.Error("failed to add node", "error", err)
 		return 0, fmt.Errorf("graphdb: failed to add node: %w", err)
 	}
 
+	db.log.Debug("node added", "id", id)
 	return id, nil
 }
 
@@ -82,8 +84,10 @@ func (db *DB) AddNodeBatch(propsList []Props) ([]NodeID, error) {
 			return nil
 		})
 		if err != nil {
+			db.log.Error("batch add failed", "count", len(propsList), "error", err)
 			return nil, fmt.Errorf("graphdb: batch add failed: %w", err)
 		}
+		db.log.Debug("batch nodes added", "count", len(propsList))
 		return ids, nil
 	}
 
@@ -158,7 +162,8 @@ func (db *DB) getNode(id NodeID) (*Node, error) {
 			return err
 		}
 
-		node = &Node{ID: id, Props: props}
+		labels := loadLabels(tx, id)
+		node = &Node{ID: id, Labels: labels, Props: props}
 		return nil
 	})
 
@@ -174,7 +179,7 @@ func (db *DB) UpdateNode(id NodeID, props Props) error {
 	}
 
 	s := db.shardFor(id)
-	return s.db.Update(func(tx *bolt.Tx) error {
+	err := s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketNodes)
 		key := encodeNodeID(id)
 
@@ -210,6 +215,12 @@ func (db *DB) UpdateNode(id NodeID, props Props) error {
 		// Add new index entries with merged properties.
 		return db.indexNodeProps(tx, id, oldProps)
 	})
+	if err != nil {
+		db.log.Error("failed to update node", "id", id, "error", err)
+	} else {
+		db.log.Debug("node updated", "id", id)
+	}
+	return err
 }
 
 // SetNodeProps replaces all properties of a node (full overwrite).
@@ -220,7 +231,7 @@ func (db *DB) SetNodeProps(id NodeID, props Props) error {
 	}
 
 	s := db.shardFor(id)
-	return s.db.Update(func(tx *bolt.Tx) error {
+	err := s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketNodes)
 		key := encodeNodeID(id)
 
@@ -249,6 +260,12 @@ func (db *DB) SetNodeProps(id NodeID, props Props) error {
 		// Add new index entries.
 		return db.indexNodeProps(tx, id, props)
 	})
+	if err != nil {
+		db.log.Error("failed to set node props", "id", id, "error", err)
+	} else {
+		db.log.Debug("node props set", "id", id)
+	}
+	return err
 }
 
 // DeleteNode removes a node and all its associated edges.
@@ -272,7 +289,7 @@ func (db *DB) DeleteNode(id NodeID) error {
 
 	// Delete the node itself (and clean up index entries).
 	s := db.shardFor(id)
-	return s.db.Update(func(tx *bolt.Tx) error {
+	err = s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketNodes)
 		key := encodeNodeID(id)
 
@@ -281,9 +298,19 @@ func (db *DB) DeleteNode(id NodeID) error {
 			return fmt.Errorf("graphdb: node %d not found", id)
 		}
 
-		// Remove index entries before deleting the node.
+		// Remove property index entries before deleting the node.
 		if props, err := decodeProps(existing); err == nil {
 			_ = db.unindexNodeProps(tx, id, props)
+		}
+
+		// Remove label index entries.
+		labels := loadLabels(tx, id)
+		if len(labels) > 0 {
+			idxBucket := tx.Bucket(bucketIdxNodeLabel)
+			for _, l := range labels {
+				_ = idxBucket.Delete(encodeLabelIndexKey(l, id))
+			}
+			_ = tx.Bucket(bucketNodeLabels).Delete(encodeNodeID(id))
 		}
 
 		if err := b.Delete(key); err != nil {
@@ -292,6 +319,12 @@ func (db *DB) DeleteNode(id NodeID) error {
 		s.nodeCount.Add(^uint64(0)) // decrement by 1
 		return nil
 	})
+	if err != nil {
+		db.log.Error("failed to delete node", "id", id, "error", err)
+	} else {
+		db.log.Debug("node deleted", "id", id, "edges_removed", len(edges))
+	}
+	return err
 }
 
 // NodeExists checks if a node exists. Safe for concurrent use.
@@ -339,7 +372,8 @@ func (db *DB) forEachNode(fn func(*Node) error) error {
 				if err != nil {
 					return err
 				}
-				return fn(&Node{ID: id, Props: props})
+				labels := loadLabels(tx, id)
+				return fn(&Node{ID: id, Labels: labels, Props: props})
 			})
 		})
 		if err != nil {

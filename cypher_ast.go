@@ -10,10 +10,10 @@ package graphdb
 //	MATCH <pattern> [WHERE <expr>] RETURN <items> [ORDER BY <items>] [LIMIT <n>]
 type CypherQuery struct {
 	Match   MatchClause
-	Where   *Expression   // nil when there is no WHERE
+	Where   *Expression // nil when there is no WHERE
 	Return  ReturnClause
-	OrderBy []OrderItem   // nil when there is no ORDER BY
-	Limit   int           // 0 means no limit
+	OrderBy []OrderItem // nil when there is no ORDER BY
+	Limit   int         // 0 means no limit
 }
 
 // MatchClause holds the pattern that follows the MATCH keyword.
@@ -39,11 +39,14 @@ type Pattern struct {
 
 // NodePattern represents a single node in a MATCH pattern.
 //
-//	(n)                → Variable="n", Props=nil
-//	(n {name:"Alice"}) → Variable="n", Props={"name":"Alice"}
+//	(n)                → Variable="n", Labels=nil, Props=nil
+//	(n:Person)         → Variable="n", Labels=["Person"], Props=nil
+//	(n:Person:Actor)   → Variable="n", Labels=["Person","Actor"], Props=nil
+//	(n {name:"Alice"}) → Variable="n", Labels=nil, Props={"name":"Alice"}
 //	()                 → anonymous node
 type NodePattern struct {
 	Variable string         // binding variable, may be ""
+	Labels   []string       // label constraints, may be nil
 	Props    map[string]any // inline property constraints, may be nil
 }
 
@@ -106,6 +109,7 @@ const (
 	ExprAnd                        // expr AND expr
 	ExprOr                         // expr OR expr
 	ExprNot                        // NOT expr
+	ExprParam                      // $paramName
 )
 
 // CompOp is a comparison operator.
@@ -149,7 +153,14 @@ type Expression struct {
 
 	// ExprNot
 	Inner *Expression
+
+	// ExprParam
+	ParamName string // parameter name without the '$' prefix
 }
+
+// paramRef is a sentinel type used in property maps to represent a $param reference.
+// When the query is executed with parameters, paramRef values are resolved to actual values.
+type paramRef string
 
 // Convenience constructors ------------------------------------------------
 

@@ -43,12 +43,12 @@ const (
 	tokType // type() function keyword
 
 	// Operators
-	tokEq   // =
-	tokNeq  // <>
-	tokLt   // <
-	tokGt   // >
-	tokLte  // <=
-	tokGte  // >=
+	tokEq  // =
+	tokNeq // <>
+	tokLt  // <
+	tokGt  // >
+	tokLte // <=
+	tokGte // >=
 
 	// Punctuation
 	tokLParen   // (
@@ -65,6 +65,7 @@ const (
 	tokDash     // -
 	tokArrow    // ->
 	tokLArrow   // <-  (for incoming edges: <-[...]-  )
+	tokParam    // $paramName
 )
 
 // Token is a single lexer token with its kind, literal text, and position.
@@ -165,6 +166,8 @@ func tokenKindName(k TokenKind) string {
 		return "->"
 	case tokLArrow:
 		return "<-"
+	case tokParam:
+		return "PARAM"
 	default:
 		return "???"
 	}
@@ -283,6 +286,9 @@ func (l *lexer) scan() error {
 
 		case isDigit(ch):
 			l.scanNumber()
+
+		case ch == '$':
+			l.scanParam()
 
 		case isIdentStart(ch):
 			l.scanIdentOrKeyword()
@@ -404,6 +410,18 @@ func (l *lexer) scanIdentOrKeyword() {
 	} else {
 		l.tokens = append(l.tokens, Token{Kind: tokIdent, Text: text, Pos: start})
 	}
+}
+
+// scanParam scans a parameter reference: $name
+func (l *lexer) scanParam() {
+	start := l.pos
+	l.pos++ // skip '$'
+	for l.pos < len(l.input) && isIdentPart(l.input[l.pos]) {
+		l.pos++
+	}
+	// Text stores just the name without the '$' prefix.
+	text := l.input[start+1 : l.pos]
+	l.tokens = append(l.tokens, Token{Kind: tokParam, Text: text, Pos: start})
 }
 
 // Character classification helpers.

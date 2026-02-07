@@ -50,6 +50,120 @@ func (db *DB) Cypher(query string) (*CypherResult, error) {
 	return db.executeCypher(ast)
 }
 
+// CypherWithParams parses and executes a parameterized Cypher query.
+// Parameters are referenced in the query as $name and resolved from the params map.
+//
+// Example:
+//
+//	db.CypherWithParams(
+//	    "MATCH (n {name: $name}) WHERE n.age > $minAge RETURN n",
+//	    map[string]any{"name": "Alice", "minAge": 25},
+//	)
+func (db *DB) CypherWithParams(query string, params map[string]any) (*CypherResult, error) {
+	if db.isClosed() {
+		return nil, fmt.Errorf("graphdb: database is closed")
+	}
+
+	ast := db.cache.get(query)
+	if ast == nil {
+		var err error
+		ast, err = parseCypher(query)
+		if err != nil {
+			return nil, err
+		}
+		db.cache.put(query, ast)
+	}
+
+	// Deep-copy and resolve parameters so the cached AST is not mutated.
+	resolved := *ast
+	if err := resolveParams(&resolved, params); err != nil {
+		return nil, err
+	}
+
+	return db.executeCypher(&resolved)
+}
+
+// resolveParams substitutes $param references in the AST with actual values.
+func resolveParams(q *CypherQuery, params map[string]any) error {
+	// Resolve inline property map params in node patterns.
+	for i := range q.Match.Pattern.Nodes {
+		np := &q.Match.Pattern.Nodes[i]
+		for k, v := range np.Props {
+			if ref, ok := v.(paramRef); ok {
+				val, exists := params[string(ref)]
+				if !exists {
+					return fmt.Errorf("graphdb: missing parameter $%s", string(ref))
+				}
+				np.Props[k] = val
+			}
+		}
+	}
+
+	// Resolve params in WHERE clause.
+	if q.Where != nil {
+		if err := resolveExprParams(q.Where, params); err != nil {
+			return err
+		}
+	}
+
+	// Resolve params in RETURN expressions.
+	for i := range q.Return.Items {
+		if err := resolveExprParams(&q.Return.Items[i].Expr, params); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// resolveExprParams recursively resolves $param references in an expression tree.
+func resolveExprParams(expr *Expression, params map[string]any) error {
+	if expr == nil {
+		return nil
+	}
+
+	switch expr.Kind {
+	case ExprParam:
+		val, exists := params[expr.ParamName]
+		if !exists {
+			return fmt.Errorf("graphdb: missing parameter $%s", expr.ParamName)
+		}
+		// Replace the param expression with a literal.
+		expr.Kind = ExprLiteral
+		expr.LitValue = val
+		expr.ParamName = ""
+
+	case ExprComparison:
+		if err := resolveExprParams(expr.Left, params); err != nil {
+			return err
+		}
+		if err := resolveExprParams(expr.Right, params); err != nil {
+			return err
+		}
+
+	case ExprAnd, ExprOr:
+		for i := range expr.Operands {
+			if err := resolveExprParams(&expr.Operands[i], params); err != nil {
+				return err
+			}
+		}
+
+	case ExprNot:
+		if err := resolveExprParams(expr.Inner, params); err != nil {
+			return err
+		}
+
+	case ExprFuncCall:
+		for i := range expr.Args {
+			if err := resolveExprParams(&expr.Args[i], params); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
 // executeCypher runs a parsed AST against the database.
 func (db *DB) executeCypher(q *CypherQuery) (*CypherResult, error) {
 	pat := q.Match.Pattern
@@ -87,6 +201,41 @@ func (db *DB) execNodeMatch(q *CypherQuery) (*CypherResult, error) {
 
 	hasOrderBy := len(q.OrderBy) > 0
 	limit := q.Limit
+
+	// ------------------------------------------------------------------
+	// Optimization 0: Label-based index lookup.
+	//   MATCH (n:Person) → use FindByLabel for fast label-index scan.
+	// ------------------------------------------------------------------
+	if len(nodePat.Labels) > 0 {
+		candidates, err := db.FindByLabel(nodePat.Labels[0])
+		if err != nil {
+			return nil, err
+		}
+		var nodes []*Node
+		for _, n := range candidates {
+			if !matchLabels(n.Labels, nodePat.Labels) {
+				continue
+			}
+			if !matchProps(n.Props, nodePat.Props) {
+				continue
+			}
+			if q.Where != nil {
+				bindings := map[string]any{varName: n}
+				ok, err := evalBool(q.Where, bindings)
+				if err != nil {
+					return nil, err
+				}
+				if !ok {
+					continue
+				}
+			}
+			nodes = append(nodes, n)
+			if limit > 0 && !hasOrderBy && len(nodes) >= limit {
+				break
+			}
+		}
+		return db.projectResults(q, nodes, nil, varName, "")
+	}
 
 	// ------------------------------------------------------------------
 	// Optimization 1: Index-accelerated inline property lookup.
@@ -515,9 +664,29 @@ func (db *DB) execVarLengthMatch(q *CypherQuery) (*CypherResult, error) {
 // Candidate finding — index-aware
 // ---------------------------------------------------------------------------
 
-// findCandidates finds all nodes matching a NodePattern's inline properties.
-// Uses secondary indexes when available to avoid full table scans.
+// findCandidates finds all nodes matching a NodePattern's labels and inline properties.
+// Uses label index and secondary property indexes when available to avoid full table scans.
 func (db *DB) findCandidates(np NodePattern) ([]*Node, error) {
+	// Fast path: label-based lookup using idx_node_label.
+	if len(np.Labels) > 0 {
+		// Use the first label for index lookup, then filter the rest.
+		candidates, err := db.FindByLabel(np.Labels[0])
+		if err != nil {
+			return nil, err
+		}
+		// Filter by additional labels and inline props.
+		if len(np.Labels) > 1 || len(np.Props) > 0 {
+			var filtered []*Node
+			for _, n := range candidates {
+				if matchLabels(n.Labels, np.Labels) && matchProps(n.Props, np.Props) {
+					filtered = append(filtered, n)
+				}
+			}
+			return filtered, nil
+		}
+		return candidates, nil
+	}
+
 	if len(np.Props) == 0 {
 		// No inline filter → all nodes.
 		var nodes []*Node
@@ -553,6 +722,23 @@ func (db *DB) findCandidates(np NodePattern) ([]*Node, error) {
 	return db.FindNodes(func(n *Node) bool {
 		return matchProps(n.Props, np.Props)
 	})
+}
+
+// matchLabels checks if a node's labels contain all required labels.
+func matchLabels(nodeLabels, required []string) bool {
+	if len(required) == 0 {
+		return true
+	}
+	set := make(map[string]bool, len(nodeLabels))
+	for _, l := range nodeLabels {
+		set[l] = true
+	}
+	for _, r := range required {
+		if !set[r] {
+			return false
+		}
+	}
+	return true
 }
 
 // ---------------------------------------------------------------------------

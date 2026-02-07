@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 // Key encoding helpers for bbolt.
@@ -96,19 +98,39 @@ func encodeIndexPrefix(prefix string) []byte {
 	return buf
 }
 
-// encodeProps serializes properties to JSON.
+// propsMagic is a 1-byte prefix that distinguishes MessagePack-encoded
+// properties from legacy JSON-encoded properties. Any data that does NOT
+// start with this byte is assumed to be JSON (backward compatibility).
+const propsMagic byte = 0x01
+
+// encodeProps serializes properties to MessagePack with a magic-byte prefix.
 func encodeProps(props Props) ([]byte, error) {
 	if props == nil {
-		return []byte("{}"), nil
+		props = make(Props)
 	}
-	return json.Marshal(props)
+	raw, err := msgpack.Marshal(props)
+	if err != nil {
+		return nil, err
+	}
+	buf := make([]byte, 1+len(raw))
+	buf[0] = propsMagic
+	copy(buf[1:], raw)
+	return buf, nil
 }
 
-// decodeProps deserializes JSON to properties.
+// decodeProps deserializes properties. It auto-detects the format:
+//   - If the first byte is propsMagic → MessagePack (new format)
+//   - Otherwise → JSON (legacy data written before the encoding upgrade)
 func decodeProps(data []byte) (Props, error) {
 	var props Props
-	if err := json.Unmarshal(data, &props); err != nil {
-		return nil, err
+	if len(data) > 0 && data[0] == propsMagic {
+		if err := msgpack.Unmarshal(data[1:], &props); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := json.Unmarshal(data, &props); err != nil {
+			return nil, err
+		}
 	}
 	if props == nil {
 		props = make(Props)
@@ -116,8 +138,8 @@ func decodeProps(data []byte) (Props, error) {
 	return props, nil
 }
 
-// encodeEdge serializes an edge to binary: ID(8) + From(8) + To(8) + labelLen(4) + label + propsJSON.
-// Fixed-size header avoids JSON overhead for the hot fields.
+// encodeEdge serializes an edge to binary: ID(8) + From(8) + To(8) + labelLen(4) + label + propsMsgpack.
+// Fixed-size header avoids serialization overhead for the hot fields.
 func encodeEdge(e *Edge) ([]byte, error) {
 	labelBytes := []byte(e.Label)
 	propsData, err := encodeProps(e.Props)
