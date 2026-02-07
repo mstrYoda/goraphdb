@@ -112,8 +112,10 @@ type Options struct {
 	ShardCount int
 	// WorkerPoolSize is the number of goroutines for concurrent query execution.
 	WorkerPoolSize int
-	// CacheSize is the LRU cache capacity for hot nodes (number of nodes).
-	CacheSize int
+	// CacheBudget is the LRU cache memory budget in bytes for hot nodes.
+	// Nodes are evicted LRU-first when the total estimated size exceeds this budget.
+	// Default: 128MB.
+	CacheBudget int64
 	// NoSync disables fsync after each commit for faster writes (risk of data loss on crash).
 	NoSync bool
 	// ReadOnly opens the database in read-only mode.
@@ -131,7 +133,7 @@ func DefaultOptions() Options {
 	return Options{
 		ShardCount:     1,
 		WorkerPoolSize: 8,
-		CacheSize:      100_000,
+		CacheBudget:    128 * 1024 * 1024, // 128MB
 		NoSync:         false,
 		ReadOnly:       false,
 		MmapSize:       256 * 1024 * 1024, // 256MB initial mmap
