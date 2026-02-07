@@ -41,22 +41,56 @@ func (db *DB) Cypher(query string) (*CypherResult, error) {
 // CypherContext is like Cypher but accepts a context for timeout/cancellation.
 // The context is checked at key iteration points; a cancelled context causes
 // the query to return immediately with the context error.
+//
+// Supports both read (MATCH) and write (CREATE) queries. For CREATE queries,
+// the result contains the created entities in Rows and creation statistics
+// are tracked via metrics.
 func (db *DB) CypherContext(ctx context.Context, query string) (*CypherResult, error) {
 	if db.isClosed() {
 		return nil, fmt.Errorf("graphdb: database is closed")
 	}
 
-	// Fast path: cache hit — skip lexer+parser entirely.
+	// Try cache first (only read queries are cached).
 	ast := db.cache.get(query)
-	if ast == nil {
-		var err error
-		ast, err = parseCypher(query)
+	if ast != nil {
+		return db.executeCypherRead(ctx, query, ast)
+	}
+
+	// Parse — may be read or write.
+	parsed, err := parseCypherAny(query)
+	if err != nil {
+		return nil, err
+	}
+
+	// CREATE query — execute write path.
+	if parsed.write != nil {
+		start := time.Now()
+		cr, err := db.executeCreate(ctx, parsed.write)
+		elapsed := time.Since(start)
+		if db.metrics != nil {
+			db.metrics.QueriesTotal.Add(1)
+			db.metrics.recordQueryDuration(elapsed)
+			if err != nil {
+				db.metrics.QueryErrorTotal.Add(1)
+			}
+		}
 		if err != nil {
 			return nil, err
 		}
-		db.cache.put(query, ast)
+		// Convert CypherCreateResult to CypherResult for unified API.
+		return &CypherResult{
+			Columns: cr.Columns,
+			Rows:    cr.Rows,
+		}, nil
 	}
 
+	// MATCH query — cache the AST and execute read path.
+	db.cache.put(query, parsed.read)
+	return db.executeCypherRead(ctx, query, parsed.read)
+}
+
+// executeCypherRead runs a cached/parsed read query with metrics and slow-query logging.
+func (db *DB) executeCypherRead(ctx context.Context, query string, ast *CypherQuery) (*CypherResult, error) {
 	start := time.Now()
 	result, err := db.executeCypher(ctx, ast)
 	elapsed := time.Since(start)

@@ -484,6 +484,186 @@ func TestCypher_Concurrent(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// CREATE tests
+// ---------------------------------------------------------------------------
+
+// TestCypherCreate_SingleNode tests creating a single node via Cypher.
+func TestCypherCreate_SingleNode(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "create_test")
+	db, err := Open(dir, DefaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// CREATE (n:Person {name: "Alice", age: 30}) RETURN n
+	result, err := db.Cypher(`CREATE (n:Person {name: "Alice", age: 30}) RETURN n`)
+	if err != nil {
+		t.Fatalf("CREATE failed: %v", err)
+	}
+	if len(result.Rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(result.Rows))
+	}
+
+	// Verify the returned node.
+	row := result.Rows[0]
+	n, ok := row["n"]
+	if !ok {
+		t.Fatal("expected 'n' in result row")
+	}
+	node, ok := n.(*Node)
+	if !ok {
+		t.Fatalf("expected *Node, got %T", n)
+	}
+	if node.GetString("name") != "Alice" {
+		t.Fatalf("expected name=Alice, got %s", node.GetString("name"))
+	}
+
+	// Verify the node persists — query it back.
+	readResult, err := db.Cypher(`MATCH (n:Person {name: "Alice"}) RETURN n.name, n.age`)
+	if err != nil {
+		t.Fatalf("MATCH failed: %v", err)
+	}
+	if len(readResult.Rows) != 1 {
+		t.Fatalf("expected 1 row from MATCH, got %d", len(readResult.Rows))
+	}
+	if readResult.Rows[0]["n.name"] != "Alice" {
+		t.Fatalf("expected n.name=Alice, got %v", readResult.Rows[0]["n.name"])
+	}
+
+	// Verify label was set.
+	hasLabel, _ := db.HasLabel(node.ID, "Person")
+	if !hasLabel {
+		t.Fatal("expected node to have label 'Person'")
+	}
+}
+
+// TestCypherCreate_NodeWithEdge tests creating two nodes and an edge.
+func TestCypherCreate_NodeWithEdge(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "create_edge_test")
+	db, err := Open(dir, DefaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// CREATE (a:Person {name: "Alice"})-[:FOLLOWS]->(b:Person {name: "Bob"}) RETURN a, b
+	result, err := db.Cypher(`CREATE (a:Person {name: "Alice"})-[:FOLLOWS]->(b:Person {name: "Bob"}) RETURN a, b`)
+	if err != nil {
+		t.Fatalf("CREATE failed: %v", err)
+	}
+	if len(result.Rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(result.Rows))
+	}
+
+	aNode := result.Rows[0]["a"].(*Node)
+	bNode := result.Rows[0]["b"].(*Node)
+
+	if aNode.GetString("name") != "Alice" {
+		t.Fatalf("expected a.name=Alice, got %s", aNode.GetString("name"))
+	}
+	if bNode.GetString("name") != "Bob" {
+		t.Fatalf("expected b.name=Bob, got %s", bNode.GetString("name"))
+	}
+
+	// Verify the edge exists.
+	hasEdge, _ := db.HasEdgeLabeled(aNode.ID, bNode.ID, "FOLLOWS")
+	if !hasEdge {
+		t.Fatal("expected FOLLOWS edge between Alice and Bob")
+	}
+
+	// Verify via Cypher read.
+	readResult, err := db.Cypher(`MATCH (a:Person {name: "Alice"})-[:FOLLOWS]->(b) RETURN b.name`)
+	if err != nil {
+		t.Fatalf("MATCH failed: %v", err)
+	}
+	if len(readResult.Rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(readResult.Rows))
+	}
+	if readResult.Rows[0]["b.name"] != "Bob" {
+		t.Fatalf("expected b.name=Bob, got %v", readResult.Rows[0]["b.name"])
+	}
+}
+
+// TestCypherCreate_MultiplePatterns tests comma-separated CREATE patterns.
+func TestCypherCreate_MultiplePatterns(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "create_multi_test")
+	db, err := Open(dir, DefaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// CREATE (a:Person {name: "Alice"}), (b:Person {name: "Bob"})
+	_, err = db.Cypher(`CREATE (a:Person {name: "Alice"}), (b:Person {name: "Bob"})`)
+	if err != nil {
+		t.Fatalf("CREATE failed: %v", err)
+	}
+
+	// Verify both nodes exist.
+	if db.NodeCount() != 2 {
+		t.Fatalf("expected 2 nodes, got %d", db.NodeCount())
+	}
+}
+
+// TestCypherCreate_NoReturn tests CREATE without RETURN.
+func TestCypherCreate_NoReturn(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "create_noret_test")
+	db, err := Open(dir, DefaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	result, err := db.Cypher(`CREATE (n:Movie {title: "The Matrix", year: 1999})`)
+	if err != nil {
+		t.Fatalf("CREATE failed: %v", err)
+	}
+	if len(result.Rows) != 0 {
+		t.Fatalf("expected 0 rows (no RETURN), got %d", len(result.Rows))
+	}
+
+	// Verify via MATCH.
+	readResult, err := db.Cypher(`MATCH (n:Movie) RETURN n.title`)
+	if err != nil {
+		t.Fatalf("MATCH failed: %v", err)
+	}
+	if len(readResult.Rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(readResult.Rows))
+	}
+	if readResult.Rows[0]["n.title"] != "The Matrix" {
+		t.Fatalf("expected title=The Matrix, got %v", readResult.Rows[0]["n.title"])
+	}
+}
+
+// TestCypherCreate_ViaCreateAPI tests the dedicated CypherCreate API.
+func TestCypherCreate_ViaCreateAPI(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "create_api_test")
+	db, err := Open(dir, DefaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	cr, err := db.CypherCreate(`CREATE (n:City {name: "Istanbul"}) RETURN n`)
+	if err != nil {
+		t.Fatalf("CypherCreate failed: %v", err)
+	}
+	if cr.Stats.NodesCreated != 1 {
+		t.Fatalf("expected 1 node created, got %d", cr.Stats.NodesCreated)
+	}
+	if cr.Stats.LabelsSet != 1 {
+		t.Fatalf("expected 1 label set, got %d", cr.Stats.LabelsSet)
+	}
+	if cr.Stats.PropsSet != 1 {
+		t.Fatalf("expected 1 prop set, got %d", cr.Stats.PropsSet)
+	}
+	if len(cr.Rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(cr.Rows))
+	}
+}
+
 // TestCypherContext_Timeout verifies that CypherContext respects context
 // cancellation during a full-scan query.
 func TestCypherContext_Timeout(t *testing.T) {

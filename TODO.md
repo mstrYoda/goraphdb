@@ -16,6 +16,7 @@
 - [ ] **Point-in-Time Recovery** — replay WAL from a backup snapshot to restore data to any past timestamp
 - [ ] **Change Data Capture (CDC)** — streaming API for external consumers to subscribe to graph mutations in real time
 - [ ] **Authentication & TLS** — user/password auth and encrypted connections for network-exposed deployments
+- [x] **Write Cypher (CREATE)** — `CREATE (n:Label {props})`, `CREATE (a)-[:REL]->(b)`, comma-separated patterns, optional RETURN; unified `Cypher()` dispatches read/write automatically
 - [ ] **Cypher Aggregations** — `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `COLLECT` and `WITH` clause for intermediate aggregation/filtering
 - [x] **OPTIONAL MATCH** — left-outer-join semantics for graph patterns ("find friends and their posts, even if they have none")
 - [x] **Variable-Length Path Patterns** — `(a)-[:KNOWS*1..5]->(b)` execution support with label filtering on source/target nodes

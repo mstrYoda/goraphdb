@@ -207,3 +207,27 @@ func orExpr(operands ...Expression) Expression {
 func notExpr(inner Expression) Expression {
 	return Expression{Kind: ExprNot, Inner: &inner}
 }
+
+// ---------------------------------------------------------------------------
+// Write queries — CREATE
+// ---------------------------------------------------------------------------
+
+// CypherWrite is the top-level AST node for a write query (CREATE).
+//
+//	CREATE <pattern> [RETURN <items>]
+//
+// A CREATE pattern is a chain of nodes and relationships to be inserted.
+// Each node may have labels and properties; each relationship has a label,
+// direction, and optional properties.
+type CypherWrite struct {
+	Creates []CreatePattern // one or more comma-separated patterns
+	Return  *ReturnClause   // nil if no RETURN
+}
+
+// CreatePattern is a chain of alternating nodes and relationships to create.
+// Same structure as a MATCH pattern, but nodes/edges will be inserted rather
+// than matched.
+type CreatePattern struct {
+	Nodes []NodePattern
+	Rels  []RelPattern
+}

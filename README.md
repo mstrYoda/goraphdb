@@ -15,7 +15,8 @@ A high-performance, embeddable graph database written in Go. Built on top of [bb
 - **Fluent query builder** — chainable Go API with filtering, pagination, and direction control
 - **Secondary indexes** — O(log N) property lookups with auto-maintenance on single writes
 - **Composite indexes** — multi-property indexes for fast compound lookups (`CreateCompositeIndex("city", "age")`)
-- **Cypher query language** — read-only subset with index-aware execution, LIMIT push-down, ORDER BY + LIMIT heap, query plan caching, `OPTIONAL MATCH`, `EXPLAIN`/`PROFILE`, and parameterized queries
+- **Cypher query language** — read and write support with index-aware execution, LIMIT push-down, ORDER BY + LIMIT heap, query plan caching, `OPTIONAL MATCH`, `EXPLAIN`/`PROFILE`, parameterized queries, and `CREATE` for inserting nodes and edges
+- **Query timeout** — `CypherContext`/`CypherWithParamsContext` accept `context.Context` for deadline-based cancellation at scan loop boundaries
 - **Transactions** — `Begin`/`Commit`/`Rollback` API for multi-statement atomic operations with read-your-writes semantics
 - **EXPLAIN / PROFILE** — query plan tree with operator types; `PROFILE` adds per-operator row counts and wall-clock timing
 - **OPTIONAL MATCH** — left-outer-join semantics for graph patterns (unmatched bindings become `nil`)
@@ -321,6 +322,31 @@ iter, err = db.CypherStreamWithParams(
     "MATCH (n {city: $city}) RETURN n.name",
     map[string]any{"city": "Istanbul"},
 )
+```
+
+### Write Cypher (CREATE)
+
+```go
+// CREATE works through the unified Cypher() API — no separate function needed.
+
+// Create a single node with labels and properties.
+result, err := db.Cypher(`CREATE (n:Person {name: "Alice", age: 30}) RETURN n`)
+node := result.Rows[0]["n"].(*graphdb.Node) // access created node
+
+// Create two nodes and an edge in one statement.
+db.Cypher(`CREATE (a:Person {name: "Alice"})-[:FOLLOWS]->(b:Person {name: "Bob"})`)
+
+// Multiple comma-separated patterns.
+db.Cypher(`CREATE (a:City {name: "Istanbul"}), (b:City {name: "Ankara"})`)
+
+// CREATE without RETURN — fire-and-forget.
+db.Cypher(`CREATE (n:Movie {title: "The Matrix", year: 1999})`)
+
+// Dedicated API with creation statistics.
+cr, _ := db.CypherCreate(`CREATE (n:Person {name: "Eve"}) RETURN n`)
+fmt.Println(cr.Stats.NodesCreated) // 1
+fmt.Println(cr.Stats.LabelsSet)    // 1
+fmt.Println(cr.Stats.PropsSet)     // 1
 ```
 
 ### Query Timeout & Cancellation

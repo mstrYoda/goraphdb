@@ -40,14 +40,48 @@ type parser struct {
 	pos    int
 }
 
-// parseCypher is the entry point: tokenise + parse a Cypher query string.
+// parsedCypher holds the result of parsing — either a read or write query.
+type parsedCypher struct {
+	read  *CypherQuery // non-nil for MATCH queries
+	write *CypherWrite // non-nil for CREATE queries
+}
+
+// parseCypher is the entry point: tokenise + parse a Cypher read query string.
+// For backwards compatibility, this only parses MATCH queries.
 func parseCypher(input string) (*CypherQuery, error) {
 	tokens, err := tokenize(input)
 	if err != nil {
 		return nil, err
 	}
 	p := &parser{tokens: tokens}
+	// Check if it's a CREATE query.
+	if p.is(tokCreate) {
+		return nil, fmt.Errorf("cypher parser: use parseCypherAny for CREATE queries")
+	}
 	return p.parseQuery()
+}
+
+// parseCypherAny parses either a read (MATCH) or write (CREATE) query.
+func parseCypherAny(input string) (*parsedCypher, error) {
+	tokens, err := tokenize(input)
+	if err != nil {
+		return nil, err
+	}
+	p := &parser{tokens: tokens}
+
+	if p.is(tokCreate) {
+		w, err := p.parseCreateQuery()
+		if err != nil {
+			return nil, err
+		}
+		return &parsedCypher{write: w}, nil
+	}
+
+	q, err := p.parseQuery()
+	if err != nil {
+		return nil, err
+	}
+	return &parsedCypher{read: q}, nil
 }
 
 // ---------------- helpers -------------------------------------------------
@@ -673,4 +707,84 @@ func (p *parser) parsePrimary() (Expression, error) {
 
 	return Expression{}, fmt.Errorf("cypher parser: unexpected token %s at position %d",
 		tokenKindName(t.Kind), t.Pos)
+}
+
+// ---------------- CREATE ---------------------------------------------------
+
+// parseCreateQuery parses:
+//
+//	CREATE pattern (',' pattern)* [RETURN returnItems]
+//
+// Supported patterns:
+//
+//	CREATE (n:Label {props})
+//	CREATE (a:Label {props})-[:REL {props}]->(b:Label {props})
+//	CREATE (a)-[:REL]->(b), (c:Label {props})
+func (p *parser) parseCreateQuery() (*CypherWrite, error) {
+	w := &CypherWrite{}
+
+	if _, err := p.expect(tokCreate); err != nil {
+		return nil, err
+	}
+
+	// Parse one or more comma-separated patterns.
+	for {
+		pat, err := p.parseCreatePattern()
+		if err != nil {
+			return nil, err
+		}
+		w.Creates = append(w.Creates, pat)
+
+		if !p.match(tokComma) {
+			break
+		}
+	}
+
+	// Optional RETURN clause.
+	if p.is(tokReturn) {
+		ret, err := p.parseReturnClause()
+		if err != nil {
+			return nil, err
+		}
+		w.Return = &ret
+	}
+
+	// Should be at EOF now.
+	if !p.is(tokEOF) {
+		return nil, fmt.Errorf("cypher parser: unexpected token %s at position %d after CREATE",
+			tokenKindName(p.cur().Kind), p.cur().Pos)
+	}
+
+	return w, nil
+}
+
+// parseCreatePattern parses a single CREATE pattern:
+//
+//	(n:Label {props}) [-[:REL {props}]-> (m:Label {props})]
+func (p *parser) parseCreatePattern() (CreatePattern, error) {
+	cp := CreatePattern{}
+
+	// First node is required.
+	node, err := p.parseNodePattern()
+	if err != nil {
+		return cp, err
+	}
+	cp.Nodes = append(cp.Nodes, node)
+
+	// Optionally, parse alternating (rel, node) pairs.
+	for p.is(tokDash) || p.is(tokLArrow) {
+		rel, err := p.parseRelPattern()
+		if err != nil {
+			return cp, err
+		}
+		cp.Rels = append(cp.Rels, rel)
+
+		node, err := p.parseNodePattern()
+		if err != nil {
+			return cp, err
+		}
+		cp.Nodes = append(cp.Nodes, node)
+	}
+
+	return cp, nil
 }
