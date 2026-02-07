@@ -323,6 +323,28 @@ iter, err = db.CypherStreamWithParams(
 )
 ```
 
+### Query Timeout & Cancellation
+
+```go
+// CypherContext accepts a context.Context for timeout/cancellation.
+// The context is checked at key iteration points (full scans, edge traversals,
+// index scans) — a cancelled context returns immediately with the context error.
+
+ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+defer cancel()
+
+result, err := db.CypherContext(ctx, `MATCH (n) RETURN n`)
+if errors.Is(err, context.DeadlineExceeded) {
+    log.Println("query timed out")
+}
+
+// Parameterized version also available:
+result, err = db.CypherWithParamsContext(ctx,
+    "MATCH (n {name: $name}) RETURN n",
+    map[string]any{"name": "Alice"},
+)
+```
+
 ### Cursor Pagination
 
 ```go

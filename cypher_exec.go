@@ -3,6 +3,7 @@ package graphdb
 import (
 	"bytes"
 	"container/heap"
+	"context"
 	"errors"
 	"fmt"
 	"sort"
@@ -34,6 +35,13 @@ type CypherResult struct {
 // Identical query strings are cached after the first parse (lock-free).
 // Safe for concurrent use.
 func (db *DB) Cypher(query string) (*CypherResult, error) {
+	return db.CypherContext(context.Background(), query)
+}
+
+// CypherContext is like Cypher but accepts a context for timeout/cancellation.
+// The context is checked at key iteration points; a cancelled context causes
+// the query to return immediately with the context error.
+func (db *DB) CypherContext(ctx context.Context, query string) (*CypherResult, error) {
 	if db.isClosed() {
 		return nil, fmt.Errorf("graphdb: database is closed")
 	}
@@ -50,7 +58,7 @@ func (db *DB) Cypher(query string) (*CypherResult, error) {
 	}
 
 	start := time.Now()
-	result, err := db.executeCypher(ast)
+	result, err := db.executeCypher(ctx, ast)
 	elapsed := time.Since(start)
 
 	if db.metrics != nil {
@@ -78,6 +86,12 @@ func (db *DB) Cypher(query string) (*CypherResult, error) {
 //	    map[string]any{"name": "Alice", "minAge": 25},
 //	)
 func (db *DB) CypherWithParams(query string, params map[string]any) (*CypherResult, error) {
+	return db.CypherWithParamsContext(context.Background(), query, params)
+}
+
+// CypherWithParamsContext is like CypherWithParams but accepts a context for
+// timeout/cancellation.
+func (db *DB) CypherWithParamsContext(ctx context.Context, query string, params map[string]any) (*CypherResult, error) {
 	if db.isClosed() {
 		return nil, fmt.Errorf("graphdb: database is closed")
 	}
@@ -99,7 +113,7 @@ func (db *DB) CypherWithParams(query string, params map[string]any) (*CypherResu
 	}
 
 	start := time.Now()
-	result, err := db.executeCypher(&resolved)
+	result, err := db.executeCypher(ctx, &resolved)
 	elapsed := time.Since(start)
 
 	if db.metrics != nil {
@@ -200,7 +214,7 @@ func resolveExprParams(expr *Expression, params map[string]any) error {
 
 // executeCypher runs a parsed AST against the database.
 // Handles EXPLAIN (plan only) and PROFILE (plan + execution with stats).
-func (db *DB) executeCypher(q *CypherQuery) (*CypherResult, error) {
+func (db *DB) executeCypher(ctx context.Context, q *CypherQuery) (*CypherResult, error) {
 	// EXPLAIN: return the plan without executing.
 	if q.Explain == ExplainOnly {
 		plan := buildPlan(q, db)
@@ -217,7 +231,7 @@ func (db *DB) executeCypher(q *CypherQuery) (*CypherResult, error) {
 		// Execute normally (strip explain mode so we don't recurse).
 		normalQ := *q
 		normalQ.Explain = ExplainNone
-		result, err := db.executeCypherNormal(&normalQ)
+		result, err := db.executeCypherNormal(ctx, &normalQ)
 		if err != nil {
 			return nil, err
 		}
@@ -229,14 +243,14 @@ func (db *DB) executeCypher(q *CypherQuery) (*CypherResult, error) {
 		return result, nil
 	}
 
-	return db.executeCypherNormal(q)
+	return db.executeCypherNormal(ctx, q)
 }
 
 // executeCypherNormal is the actual execution engine (no EXPLAIN/PROFILE handling).
-func (db *DB) executeCypherNormal(q *CypherQuery) (*CypherResult, error) {
+func (db *DB) executeCypherNormal(ctx context.Context, q *CypherQuery) (*CypherResult, error) {
 	// If there is an OPTIONAL MATCH, handle it with the left-outer-join path.
 	if q.OptionalMatch != nil {
-		return db.execWithOptionalMatch(q)
+		return db.execWithOptionalMatch(ctx, q)
 	}
 
 	pat := q.Match.Pattern
@@ -245,15 +259,15 @@ func (db *DB) executeCypherNormal(q *CypherQuery) (*CypherResult, error) {
 	switch {
 	case len(pat.Nodes) == 1 && len(pat.Rels) == 0:
 		// Simple node match: MATCH (n) or MATCH (n {prop: val})
-		return db.execNodeMatch(q)
+		return db.execNodeMatch(ctx, q)
 
 	case len(pat.Nodes) == 2 && len(pat.Rels) == 1:
 		// Single-hop pattern: MATCH (a)-[r:LABEL]->(b)
 		rel := pat.Rels[0]
 		if rel.VarLength {
-			return db.execVarLengthMatch(q)
+			return db.execVarLengthMatch(ctx, q)
 		}
-		return db.execSingleHopMatch(q)
+		return db.execSingleHopMatch(ctx, q)
 
 	default:
 		return nil, fmt.Errorf("cypher exec: unsupported pattern with %d nodes and %d relationships",
@@ -276,7 +290,9 @@ func annotateProfileStats(node *PlanNode, totalRows int, elapsed time.Duration) 
 // Strategy 1: Simple node match — MATCH (n) / MATCH (n {name: "Alice"})
 // ---------------------------------------------------------------------------
 
-func (db *DB) execNodeMatch(q *CypherQuery) (*CypherResult, error) {
+var errContextDone = errors.New("graphdb: context done")
+
+func (db *DB) execNodeMatch(ctx context.Context, q *CypherQuery) (*CypherResult, error) {
 	nodePat := q.Match.Pattern.Nodes[0]
 	varName := nodePat.Variable
 	if varName == "" {
@@ -386,6 +402,10 @@ func (db *DB) execNodeMatch(q *CypherQuery) (*CypherResult, error) {
 	// ------------------------------------------------------------------
 	var nodes []*Node
 	err := db.forEachNode(func(n *Node) error {
+		// Check context cancellation periodically.
+		if err := ctx.Err(); err != nil {
+			return errContextDone
+		}
 		// Inline property filter.
 		if !matchProps(n.Props, nodePat.Props) {
 			return nil
@@ -409,6 +429,9 @@ func (db *DB) execNodeMatch(q *CypherQuery) (*CypherResult, error) {
 		}
 		return nil
 	})
+	if errors.Is(err, errContextDone) {
+		return nil, ctx.Err()
+	}
 	if err != nil && !errors.Is(err, errLimitReached) {
 		return nil, err
 	}
@@ -513,7 +536,7 @@ func extractWhereEquality(where *Expression, nodeVar string) (string, any, bool)
 // Strategy 2: Single-hop pattern — MATCH (a)-[r:LABEL]->(b)
 // ---------------------------------------------------------------------------
 
-func (db *DB) execSingleHopMatch(q *CypherQuery) (*CypherResult, error) {
+func (db *DB) execSingleHopMatch(ctx context.Context, q *CypherQuery) (*CypherResult, error) {
 	pat := q.Match.Pattern
 	aPat := pat.Nodes[0]
 	rel := pat.Rels[0]
@@ -537,7 +560,7 @@ func (db *DB) execSingleHopMatch(q *CypherQuery) (*CypherResult, error) {
 	// a single View transaction per shard (great for locality).
 	// ------------------------------------------------------------------
 	if len(aPat.Props) == 0 && rel.Label != "" && rel.Dir == Outgoing {
-		return db.execSingleHopByEdgeType(q, aPat, rel, bPat, aVar, rVar, bVar)
+		return db.execSingleHopByEdgeType(ctx, q, aPat, rel, bPat, aVar, rVar, bVar)
 	}
 
 	// Step 1: Find all candidate "a" nodes.
@@ -550,6 +573,9 @@ func (db *DB) execSingleHopMatch(q *CypherQuery) (*CypherResult, error) {
 	var rows []resultRow
 
 	for _, a := range aCandidates {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		edges, err := db.getEdgesForNode(a.ID, rel.Dir)
 		if err != nil {
 			return nil, err
@@ -608,7 +634,7 @@ func (db *DB) execSingleHopMatch(q *CypherQuery) (*CypherResult, error) {
 // Runs in a single View transaction per shard for maximum efficiency.
 //
 // Applies to: MATCH (a)-[:LABEL]->(b) with no inline filter on "a".
-func (db *DB) execSingleHopByEdgeType(q *CypherQuery, aPat NodePattern, rel RelPattern, bPat NodePattern, aVar, rVar, bVar string) (*CypherResult, error) {
+func (db *DB) execSingleHopByEdgeType(ctx context.Context, q *CypherQuery, aPat NodePattern, rel RelPattern, bPat NodePattern, aVar, rVar, bVar string) (*CypherResult, error) {
 	prefix := encodeIndexPrefix(rel.Label)
 	var rows []resultRow
 
@@ -620,6 +646,9 @@ func (db *DB) execSingleHopByEdgeType(q *CypherQuery, aPat NodePattern, rel RelP
 
 			c := idxBucket.Cursor()
 			for k, _ := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, _ = c.Next() {
+				if err := ctx.Err(); err != nil {
+					return errContextDone
+				}
 				edgeIDBytes := k[len(prefix):]
 				if len(edgeIDBytes) < 8 {
 					continue
@@ -706,6 +735,9 @@ func (db *DB) execSingleHopByEdgeType(q *CypherQuery, aPat NodePattern, rel RelP
 			}
 			return nil
 		})
+		if errors.Is(err, errContextDone) {
+			return nil, ctx.Err()
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -718,7 +750,7 @@ func (db *DB) execSingleHopByEdgeType(q *CypherQuery, aPat NodePattern, rel RelP
 // Strategy 3: Variable-length path — MATCH (a)-[:LABEL*min..max]->(b)
 // ---------------------------------------------------------------------------
 
-func (db *DB) execVarLengthMatch(q *CypherQuery) (*CypherResult, error) {
+func (db *DB) execVarLengthMatch(ctx context.Context, q *CypherQuery) (*CypherResult, error) {
 	pat := q.Match.Pattern
 	aPat := pat.Nodes[0]
 	rel := pat.Rels[0]

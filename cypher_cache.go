@@ -1,6 +1,7 @@
 package graphdb
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -195,7 +196,7 @@ func (db *DB) ExecutePrepared(pq *PreparedQuery) (*CypherResult, error) {
 	if db.isClosed() {
 		return nil, fmt.Errorf("graphdb: database is closed")
 	}
-	return db.executeCypher(pq.ast)
+	return db.executeCypher(context.Background(), pq.ast)
 }
 
 // ExecutePreparedWithParams executes a prepared query with parameter substitution.
@@ -206,7 +207,7 @@ func (db *DB) ExecutePreparedWithParams(pq *PreparedQuery, params map[string]any
 		return nil, fmt.Errorf("graphdb: database is closed")
 	}
 	if len(params) == 0 {
-		return db.executeCypher(pq.ast)
+		return db.executeCypher(context.Background(), pq.ast)
 	}
 
 	// Deep-copy and resolve parameters so the cached AST is not mutated.
@@ -214,7 +215,7 @@ func (db *DB) ExecutePreparedWithParams(pq *PreparedQuery, params map[string]any
 	if err := resolveParams(&resolved, params); err != nil {
 		return nil, err
 	}
-	return db.executeCypher(&resolved)
+	return db.executeCypher(context.Background(), &resolved)
 }
 
 // QueryCacheStats returns statistics about the query plan cache.

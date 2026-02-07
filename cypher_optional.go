@@ -1,6 +1,7 @@
 package graphdb
 
 import (
+	"context"
 	"strings"
 )
 
@@ -17,7 +18,7 @@ import (
 // execWithOptionalMatch handles queries that have an OPTIONAL MATCH clause.
 // It executes the main MATCH first, then for each result row attempts the
 // optional pattern expansion.
-func (db *DB) execWithOptionalMatch(q *CypherQuery) (*CypherResult, error) {
+func (db *DB) execWithOptionalMatch(_ context.Context, q *CypherQuery) (*CypherResult, error) {
 	// Step 1: Execute the main MATCH to get primary bindings.
 	mainQ := &CypherQuery{
 		Match: q.Match,

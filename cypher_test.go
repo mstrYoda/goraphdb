@@ -1,9 +1,12 @@
 package graphdb
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // setupCypherTestDB creates a test database with a social graph:
@@ -478,5 +481,57 @@ func TestCypher_Concurrent(t *testing.T) {
 		if err := <-errc; err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// TestCypherContext_Timeout verifies that CypherContext respects context
+// cancellation during a full-scan query.
+func TestCypherContext_Timeout(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "timeout_test")
+	db, err := Open(dir, DefaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// Insert a batch of nodes.
+	batch := make([]Props, 200)
+	for i := range batch {
+		batch[i] = Props{"i": float64(i)}
+	}
+	db.AddNodeBatch(batch)
+
+	// Use an already-cancelled context — should return immediately.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel before query
+
+	_, err = db.CypherContext(ctx, `MATCH (n) RETURN n`)
+	if err == nil {
+		t.Fatal("expected error from cancelled context, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+
+	// Use a very short timeout — should also fail.
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 1*time.Nanosecond)
+	defer cancel2()
+	time.Sleep(5 * time.Millisecond) // ensure deadline has passed
+
+	_, err = db.CypherContext(ctx2, `MATCH (n) RETURN n`)
+	if err == nil {
+		t.Fatal("expected error from expired context, got nil")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context.DeadlineExceeded, got: %v", err)
+	}
+
+	// Verify a normal context still works.
+	result, err := db.CypherContext(context.Background(), `MATCH (n) RETURN n LIMIT 5`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Rows) != 5 {
+		t.Fatalf("expected 5 rows, got %d", len(result.Rows))
 	}
 }
