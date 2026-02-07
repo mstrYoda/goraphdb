@@ -23,14 +23,15 @@ type DB struct {
 	dir              string
 	shards           []*shard
 	pool             *workerPool
-	cache            queryCache   // Cypher AST cache — avoids re-parsing identical queries
-	ncache           *nodeCache   // LRU hot-node cache — avoids repeated bbolt lookups
-	log              *slog.Logger // structured logger for all operations
-	mu               sync.Mutex   // only used in Close() to prevent double-close
-	closed           atomic.Bool  // atomic flag — checked by every operation without locking
-	indexedProps     sync.Map     // map[string]bool — tracks which property names have secondary indexes
-	compositeIndexes sync.Map     // map[string]compositeIndexDef — tracks composite indexes
-	metrics          *Metrics     // operational counters (Prometheus-compatible)
+	cache            queryCache    // Cypher AST cache — avoids re-parsing identical queries
+	ncache           *nodeCache    // LRU hot-node cache — avoids repeated bbolt lookups
+	log              *slog.Logger  // structured logger for all operations
+	mu               sync.Mutex    // only used in Close() to prevent double-close
+	closed           atomic.Bool   // atomic flag — checked by every operation without locking
+	indexedProps     sync.Map      // map[string]bool — tracks which property names have secondary indexes
+	compositeIndexes sync.Map      // map[string]compositeIndexDef — tracks composite indexes
+	metrics          *Metrics      // operational counters (Prometheus-compatible)
+	slowLog          *slowQueryLog // ring buffer of recent slow queries
 }
 
 // Open creates or opens a graph database at the given directory path.
@@ -82,6 +83,7 @@ func Open(dir string, opts Options) (*DB, error) {
 	db.discoverCompositeIndexes()
 
 	db.metrics = newMetrics(db)
+	db.slowLog = newSlowQueryLog(100)
 
 	db.log.Info("database opened",
 		"dir", dir,

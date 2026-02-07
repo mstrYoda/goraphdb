@@ -90,8 +90,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/edges/cursor", s.handleListEdgesCursor)
 	s.mux.HandleFunc("DELETE /api/edges/{id}", s.handleDeleteEdge)
 
-	// Metrics
+	// Metrics & Observability
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
+	s.mux.HandleFunc("GET /api/metrics", s.handleMetricsJSON)
+	s.mux.HandleFunc("GET /api/slow-queries", s.handleSlowQueries)
 
 	// SPA fallback — must be last.
 	if s.uiDir != "" {
@@ -755,6 +757,27 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	m.WritePrometheus(w)
+}
+
+func (s *Server) handleMetricsJSON(w http.ResponseWriter, _ *http.Request) {
+	m := s.db.Metrics()
+	if m == nil {
+		writeError(w, 500, "metrics not initialized")
+		return
+	}
+	writeJSON(w, 200, m.Snapshot())
+}
+
+func (s *Server) handleSlowQueries(w http.ResponseWriter, r *http.Request) {
+	limit := intQuery(r, "limit", 50)
+	entries := s.db.SlowQueries(limit)
+	if entries == nil {
+		entries = []graphdb.SlowQueryEntry{}
+	}
+	writeJSON(w, 200, map[string]any{
+		"queries": entries,
+		"count":   len(entries),
+	})
 }
 
 // ---------------------------------------------------------------------------
