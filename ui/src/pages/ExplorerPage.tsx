@@ -1,16 +1,19 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { ChevronLeft, ChevronRight, Trash2 } from 'lucide-react'
 import GraphViewer from '../components/GraphViewer'
 import { api } from '../api/client'
-import type { GNode, GraphVizNode, GraphVizEdge } from '../types'
+import type { GNode, GraphVizNode, GraphVizEdge, CursorNode } from '../types'
 
 const PAGE_SIZE = 30
 
 export default function ExplorerPage() {
-  const [nodes, setNodes] = useState<GNode[]>([])
-  const [total, setTotal] = useState(0)
-  const [offset, setOffset] = useState(0)
+  const [nodes, setNodes] = useState<CursorNode[]>([])
+  const [hasMore, setHasMore] = useState(false)
   const [loading, setLoading] = useState(true)
+
+  // Cursor stack for back/forward navigation
+  const cursorStack = useRef<number[]>([0])
+  const [stackIdx, setStackIdx] = useState(0)
 
   // Selection state
   const [selectedNode, setSelectedNode] = useState<GNode | null>(null)
@@ -18,23 +21,23 @@ export default function ExplorerPage() {
   const [graphEdges, setGraphEdges] = useState<GraphVizEdge[]>([])
   const [edgeCount, setEdgeCount] = useState(0)
 
-  // Load node list
-  const loadList = useCallback(async () => {
+  // Load node list using cursor pagination
+  const loadList = useCallback(async (cursor: number) => {
     setLoading(true)
     try {
-      const res = await api.listNodes(PAGE_SIZE, offset)
+      const res = await api.listNodesCursor(cursor, PAGE_SIZE)
       setNodes(res.nodes ?? [])
-      setTotal(res.total)
+      setHasMore(res.has_more)
     } catch (e: any) {
       console.error('Failed to load nodes:', e)
     } finally {
       setLoading(false)
     }
-  }, [offset])
+  }, [])
 
   useEffect(() => {
-    loadList()
-  }, [loadList])
+    loadList(cursorStack.current[stackIdx])
+  }, [loadList, stackIdx])
 
   // Select and explore a node
   const selectNode = useCallback(async (node: GNode) => {
@@ -74,13 +77,28 @@ export default function ExplorerPage() {
         setGraphNodes([])
         setGraphEdges([])
       }
-      await loadList()
+      await loadList(cursorStack.current[stackIdx])
     } catch (e: any) {
       console.error(e)
     }
   }
 
-  const displayLabel = (n: GNode) =>
+  const goNext = () => {
+    if (!hasMore || nodes.length === 0) return
+    const lastId = nodes[nodes.length - 1].id
+    // Push new cursor onto stack if we're at the end
+    if (stackIdx === cursorStack.current.length - 1) {
+      cursorStack.current.push(lastId)
+    }
+    setStackIdx(stackIdx + 1)
+  }
+
+  const goPrev = () => {
+    if (stackIdx <= 0) return
+    setStackIdx(stackIdx - 1)
+  }
+
+  const displayLabel = (n: CursorNode) =>
     n.props?.name ?? n.props?.title ?? n.props?.label ?? `Node ${n.id}`
 
   return (
@@ -103,7 +121,7 @@ export default function ExplorerPage() {
               {nodes.map((node) => (
                 <div
                   key={node.id}
-                  onClick={() => selectNode(node)}
+                  onClick={() => selectNode({ id: node.id, props: node.props })}
                   className={`flex items-center justify-between px-4 py-3 cursor-pointer transition-colors ${
                     selectedNode?.id === node.id
                       ? 'bg-blue-500/10 border-l-2 border-blue-400'
@@ -137,21 +155,21 @@ export default function ExplorerPage() {
         {/* Pagination */}
         <div className="flex items-center justify-between mt-3 text-xs text-slate-500">
           <span>
-            {total === 0
+            {nodes.length === 0
               ? 'empty'
-              : `${offset + 1}–${Math.min(offset + PAGE_SIZE, total)} of ${total}`}
+              : `${nodes.length} nodes${hasMore ? ' (more →)' : ''}`}
           </span>
           <div className="flex gap-1">
             <button
-              onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
-              disabled={offset === 0}
+              onClick={goPrev}
+              disabled={stackIdx === 0}
               className="p-1 rounded hover:bg-slate-800 disabled:opacity-30 transition-colors"
             >
               <ChevronLeft className="w-4 h-4" />
             </button>
             <button
-              onClick={() => setOffset(offset + PAGE_SIZE)}
-              disabled={offset + PAGE_SIZE >= total}
+              onClick={goNext}
+              disabled={!hasMore}
               className="p-1 rounded hover:bg-slate-800 disabled:opacity-30 transition-colors"
             >
               <ChevronRight className="w-4 h-4" />

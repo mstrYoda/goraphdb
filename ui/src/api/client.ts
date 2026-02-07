@@ -5,6 +5,10 @@ import type {
   NodeListResponse,
   GNode,
   NeighborhoodResponse,
+  MetricsSnapshot,
+  SlowQueryResponse,
+  NodeCursorPage,
+  EdgeCursorPage,
 } from '../types'
 
 const BASE = '/api'
@@ -70,4 +74,17 @@ export const api = {
     }),
   deleteEdge: (id: number) =>
     fetchJSON<{ status: string }>(`/edges/${id}`, { method: 'DELETE' }),
+
+  // ── Metrics ─────────────────────────────────────────────────────────
+  getMetrics: () => fetchJSON<MetricsSnapshot>('/metrics'),
+
+  // ── Slow Queries ────────────────────────────────────────────────────
+  getSlowQueries: (limit = 50) =>
+    fetchJSON<SlowQueryResponse>(`/slow-queries?limit=${limit}`),
+
+  // ── Cursor Pagination ───────────────────────────────────────────────
+  listNodesCursor: (cursor = 0, limit = 30) =>
+    fetchJSON<NodeCursorPage>(`/nodes/cursor?cursor=${cursor}&limit=${limit}`),
+  listEdgesCursor: (cursor = 0, limit = 30) =>
+    fetchJSON<EdgeCursorPage>(`/edges/cursor?cursor=${cursor}&limit=${limit}`),
 }

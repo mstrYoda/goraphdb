@@ -62,3 +62,67 @@ export interface NeighborhoodResponse {
   neighbors: GraphVizNode[]
   edges: GraphVizEdge[]
 }
+
+// Metrics snapshot from GET /api/metrics
+export interface MetricsSnapshot {
+  queries_total: number
+  slow_queries_total: number
+  query_errors_total: number
+  query_duration_sum_us: number
+  query_duration_max_us: number
+  cache_hits_total: number
+  cache_misses_total: number
+  nodes_created_total: number
+  nodes_deleted_total: number
+  edges_created_total: number
+  edges_deleted_total: number
+  index_lookups_total: number
+  node_cache_bytes_used?: number
+  node_cache_budget_bytes?: number
+  node_count?: number
+  edge_count?: number
+  query_cache_entries?: number
+  query_cache_capacity?: number
+}
+
+// Slow query entry from GET /api/slow-queries
+export interface SlowQueryEntry {
+  query: string
+  duration_ms: number
+  rows: number
+  timestamp: string
+}
+
+export interface SlowQueryResponse {
+  queries: SlowQueryEntry[]
+  count: number
+}
+
+// Cursor pagination responses
+export interface NodeCursorPage {
+  nodes: CursorNode[]
+  next_cursor: number
+  has_more: boolean
+  limit: number
+}
+
+export interface CursorNode {
+  id: number
+  labels?: string[]
+  props: Record<string, any>
+}
+
+export interface EdgeCursorPage {
+  edges: CursorEdge[]
+  next_cursor: number
+  has_more: boolean
+  limit: number
+}
+
+export interface CursorEdge {
+  id: number
+  from: number
+  to: number
+  label: string
+  props?: Record<string, any>
+}
