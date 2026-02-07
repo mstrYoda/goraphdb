@@ -8,12 +8,21 @@ A high-performance, embeddable graph database written in Go. Built on top of [bb
 
 - **Directed labeled graph** — nodes and edges with arbitrary JSON-like properties  
   `alice ---follows---> bob`, `server ---consumes---> queue`
+- **Node labels** — first-class `:Person`, `:Movie` labels with dedicated index and Cypher support (`MATCH (n:Person)`)
 - **Concurrent reads** — fully parallel BFS, DFS, Cypher, and query-builder calls via MVCC
 - **50 GB+ ready** — bbolt memory-mapped storage with configurable `MmapSize`
 - **Graph algorithms** — BFS, DFS, Shortest Path (unweighted & Dijkstra), All Paths, Connected Components, Topological Sort
 - **Fluent query builder** — chainable Go API with filtering, pagination, and direction control
 - **Secondary indexes** — O(log N) property lookups with auto-maintenance on single writes
-- **Cypher query language** — read-only subset (7 patterns) with index-aware execution, LIMIT push-down, ORDER BY + LIMIT heap, and query plan caching
+- **Cypher query language** — read-only subset with index-aware execution, LIMIT push-down, ORDER BY + LIMIT heap, query plan caching, `OPTIONAL MATCH`, `EXPLAIN`/`PROFILE`, and parameterized queries
+- **Transactions** — `Begin`/`Commit`/`Rollback` API for multi-statement atomic operations with read-your-writes semantics
+- **EXPLAIN / PROFILE** — query plan tree with operator types; `PROFILE` adds per-operator row counts and wall-clock timing
+- **OPTIONAL MATCH** — left-outer-join semantics for graph patterns (unmatched bindings become `nil`)
+- **Node hot cache** — sharded concurrent LRU cache for frequently accessed nodes, reducing bbolt lookups and MessagePack decoding
+- **Data integrity** — CRC32 (Castagnoli) checksums on all node/edge data, verified on every read, with a `VerifyIntegrity()` full scan
+- **Binary encoding** — MessagePack property serialization (3–5× faster, 30–50% smaller than JSON) with backward-compatible format detection
+- **Structured logging** — `log/slog` integration for all write operations, errors, and lifecycle events
+- **Parameterized queries** — `$param` tokens in Cypher for safe substitution and plan reuse
 - **Batch operations** — `AddNodeBatch` / `AddEdgeBatch` for bulk loading with single-fsync transactions
 - **Worker pool** — built-in goroutine pool for concurrent query execution
 - **Optional sharding** — hash-based partitioning across multiple bbolt files; edges co-located with source nodes for single-shard traversals
@@ -119,6 +128,42 @@ err = db.ForEachNode(func(n *graphdb.Node) error {
     fmt.Println(n.Props)
     return nil
 })
+```
+
+### Node Labels
+
+```go
+// Create a node with labels
+id, err := db.AddNodeWithLabels([]string{"Person", "Employee"}, graphdb.Props{"name": "Alice"})
+
+// Add / remove labels on existing nodes
+err = db.AddLabel(id, "Admin")
+err = db.RemoveLabel(id, "Employee")
+
+// Query labels
+labels, err := db.GetLabels(id)           // ["Person", "Admin"]
+has, err := db.HasLabel(id, "Person")     // true
+
+// Find all nodes with a label (index-backed)
+people, err := db.FindByLabel("Person")
+```
+
+### Transactions
+
+```go
+// Multi-statement atomic operations with read-your-writes semantics.
+tx, err := db.Begin()
+
+alice, _ := tx.AddNode(graphdb.Props{"name": "Alice"})
+bob, _ := tx.AddNode(graphdb.Props{"name": "Bob"})
+tx.AddEdge(alice, bob, "follows", nil)
+
+// Read uncommitted data within the same transaction.
+node, _ := tx.GetNode(alice) // visible before commit
+
+err = tx.Commit()   // atomically persists all changes
+// — or —
+err = tx.Rollback() // discards all changes
 ```
 
 ### Edge Operations
@@ -276,6 +321,47 @@ res, _ := db.Cypher(`MATCH (a)-[:follows*1..3]->(b) RETURN b`)
 
 // 7. Any edge type with type() function
 res, _ := db.Cypher(`MATCH (a)-[r]->(b) RETURN type(r), b`)
+
+// 8. Label-based matching (index-backed)
+res, _ := db.Cypher(`MATCH (n:Person) RETURN n`)
+res, _ = db.Cypher(`MATCH (a:Person)-[:follows]->(b:Person) RETURN a, b`)
+
+// 9. OPTIONAL MATCH — left-outer-join (nil when no match)
+res, _ = db.Cypher(`MATCH (n:Person) OPTIONAL MATCH (n)-[r:WROTE]->(b) RETURN n.name, b`)
+```
+
+#### EXPLAIN / PROFILE
+
+```go
+// EXPLAIN — returns the query plan without executing (zero I/O)
+res, _ := db.Cypher(`EXPLAIN MATCH (n:Person) WHERE n.age > 25 RETURN n`)
+fmt.Println(res.Plan.String())
+// EXPLAIN:
+// └── ProduceResults (n)
+//     └── Filter (WHERE clause)
+//         └── NodeByLabelScan (n:Person)
+
+// PROFILE — executes and returns the plan annotated with actual row counts + timing
+res, _ = db.Cypher(`PROFILE MATCH (n:Person) RETURN n`)
+fmt.Println(res.Plan.String())
+// PROFILE:
+// └── ProduceResults (n) [rows=42, time=150µs]
+//     └── NodeByLabelScan (n:Person) [rows=42]
+
+// The actual query results are still available:
+for _, row := range res.Rows {
+    fmt.Println(row["n"])
+}
+```
+
+#### Parameterized Queries
+
+```go
+// Use $param tokens to prevent injection and enable plan caching.
+res, _ := db.CypherWithParams(
+    `MATCH (n {name: $name}) WHERE n.age > $minAge RETURN n`,
+    map[string]any{"name": "Alice", "minAge": 25},
+)
 ```
 
 #### ORDER BY, LIMIT, Prepared Queries
@@ -307,6 +393,22 @@ fmt.Printf("Nodes: %d, Edges: %d, Shards: %d, Disk: %.1f MB\n",
     float64(stats.DiskSizeBytes)/1024/1024)
 ```
 
+### Data Integrity
+
+```go
+// Verify all node and edge data across all shards (CRC32 checksums).
+report, err := db.VerifyIntegrity()
+fmt.Printf("Checked %d nodes, %d edges\n", report.NodesChecked, report.EdgesChecked)
+
+if report.OK() {
+    fmt.Println("All data intact!")
+} else {
+    for _, e := range report.Errors {
+        fmt.Println(e) // "shard 0, nodes[00000001]: props checksum mismatch ..."
+    }
+}
+```
+
 ## Architecture
 
 ```
@@ -320,22 +422,23 @@ fmt.Printf("Nodes: %d, Edges: %d, Shards: %d, Disk: %.1f MB\n",
 │   /api/stats · CORS · SPA fallback                           │
 ├──────────────────────────────────────────────────────────────┤
 │                        Public API                            │
-│   Node CRUD · Edge CRUD · BFS/DFS · Paths · Query Builder   │
-│   Cypher(string) · PrepareCypher · Indexes · Stats           │
+│   Node/Edge CRUD · Labels · Transactions (Begin/Commit)      │
+│   BFS/DFS · Paths · Query Builder · VerifyIntegrity          │
 ├──────────────────────────────────────────────────────────────┤
 │                     Cypher Engine                            │
 │   Lexer → Parser → AST → Executor (index-aware)             │
+│   EXPLAIN/PROFILE · OPTIONAL MATCH · Parameterized ($param)  │
 │   Query plan cache · LIMIT push-down · Top-K heap           │
 ├──────────────────────────────────────────────────────────────┤
 │                    Shard Manager                             │
 │   Hash-based routing · Cross-shard edge handling             │
-│   Worker pool for concurrent execution                       │
+│   Worker pool · Sharded LRU node cache                       │
 ├──────────────────────────────────────────────────────────────┤
 │                   Storage Layer                              │
 │   bbolt (B+tree) · Memory-mapped files · MVCC               │
-│   Binary encoding · Adjacency-list layout                    │
+│   MessagePack encoding · CRC32 checksums · Labels index      │
 ├──────────────────────────────────────────────────────────────┤
-│  Buckets: nodes│edges│adj_out│adj_in│idx_prop│idx_edge_type  │
+│  nodes│edges│adj_*│idx_prop│idx_edge_type│node_labels│idx_lbl│
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -343,12 +446,14 @@ fmt.Printf("Nodes: %d, Edges: %d, Shards: %d, Disk: %.1f MB\n",
 
 | Bucket | Key | Value | Purpose |
 |---|---|---|---|
-| `nodes` | `uint64 nodeID` | JSON properties | Node data |
-| `edges` | `uint64 edgeID` | Binary-encoded edge | Edge data (from, to, label, props) |
+| `nodes` | `uint64 nodeID` | MessagePack props + CRC32 | Node data |
+| `edges` | `uint64 edgeID` | Binary edge + CRC32 | Edge data (from, to, label, props) |
 | `adj_out` | `nodeID \| edgeID` | `targetID \| label` | Outgoing adjacency list |
 | `adj_in` | `nodeID \| edgeID` | `sourceID \| label` | Incoming adjacency list |
 | `idx_prop` | `"prop:value" \| nodeID` | ∅ | Secondary property index |
 | `idx_edge_type` | `"label" \| edgeID` | ∅ | Edge type index |
+| `node_labels` | `uint64 nodeID` | MessagePack `[]string` | Node label storage |
+| `idx_node_label` | `"label" \| nodeID` | ∅ | Label → node index |
 | `meta` | `"node_counter"` / `"edge_counter"` | `uint64` | ID allocation counters |
 
 ### Concurrency Model
@@ -456,6 +561,18 @@ go run ./examples/cypher/
 
 # Benchmark — 100K nodes, batch insert, index-aware Cypher performance
 go run ./examples/benchmark/
+
+# Labels, transactions, parameterized queries
+go run ./examples/labels_tx/
+
+# EXPLAIN/PROFILE — query plan inspection and profiling
+go run ./examples/explain_profile/
+
+# OPTIONAL MATCH — left-outer-join semantics
+go run ./examples/optional_match/
+
+# Data integrity — CRC32 checksums + VerifyIntegrity scan
+go run ./examples/integrity/
 ```
 
 ## Benchmarks
