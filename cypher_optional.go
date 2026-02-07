@@ -319,11 +319,7 @@ func (db *DB) projectBindings(q *CypherQuery, bindings []map[string]any) (*Cyphe
 
 	// Build columns.
 	for _, item := range q.Return.Items {
-		name := item.Alias
-		if name == "" {
-			name = formatExprBrief(item.Expr)
-		}
-		result.Columns = append(result.Columns, name)
+		result.Columns = append(result.Columns, returnItemName(item))
 	}
 
 	// Build rows.
@@ -332,9 +328,9 @@ func (db *DB) projectBindings(q *CypherQuery, bindings []map[string]any) (*Cyphe
 		for _, item := range q.Return.Items {
 			colName := item.Alias
 			if colName == "" {
-				colName = formatExprBrief(item.Expr)
+				colName = returnItemName(item)
 			}
-			val := evalExprFromBinding(item.Expr, binding)
+			val, _ := evalExpr(&item.Expr, binding)
 			row[colName] = val
 		}
 		result.Rows = append(result.Rows, row)
@@ -342,7 +338,7 @@ func (db *DB) projectBindings(q *CypherQuery, bindings []map[string]any) (*Cyphe
 
 	// ORDER BY.
 	if len(q.OrderBy) > 0 {
-		sortResultRows(result, q.OrderBy)
+		sortRows(result.Rows, q.OrderBy)
 	}
 
 	// LIMIT.
@@ -351,79 +347,4 @@ func (db *DB) projectBindings(q *CypherQuery, bindings []map[string]any) (*Cyphe
 	}
 
 	return result, nil
-}
-
-// evalExprFromBinding evaluates a RETURN expression against a binding map.
-func evalExprFromBinding(expr Expression, binding map[string]any) any {
-	switch expr.Kind {
-	case ExprVarRef:
-		return binding[expr.Variable]
-	case ExprPropAccess:
-		val := binding[expr.Variable]
-		if val == nil {
-			return nil
-		}
-		switch v := val.(type) {
-		case *Node:
-			if v == nil {
-				return nil
-			}
-			return v.Props[expr.Property]
-		case *Edge:
-			if v == nil {
-				return nil
-			}
-			return v.Props[expr.Property]
-		}
-		return nil
-	case ExprFuncCall:
-		if strings.EqualFold(expr.FuncName, "type") && len(expr.Args) == 1 {
-			val := evalExprFromBinding(expr.Args[0], binding)
-			if e, ok := val.(*Edge); ok && e != nil {
-				return e.Label
-			}
-			return nil
-		}
-		return nil
-	case ExprLiteral:
-		return expr.LitValue
-	default:
-		return nil
-	}
-}
-
-// sortResultRows sorts CypherResult rows by the ORDER BY items.
-func sortResultRows(result *CypherResult, orderBy []OrderItem) {
-	if len(result.Rows) <= 1 {
-		return
-	}
-
-	// Use a simple sort based on the first ORDER BY expression.
-	// This is a simplified version; a full implementation would handle
-	// multiple sort keys and type-aware comparison.
-	item := orderBy[0]
-	colName := formatExprBrief(item.Expr)
-
-	less := func(i, j int) bool {
-		vi := result.Rows[i][colName]
-		vj := result.Rows[j][colName]
-		cmp := compareValues(vi, vj)
-		if item.Desc {
-			return cmp > 0
-		}
-		return cmp < 0
-	}
-
-	// Stable sort preserves insertion order for equal elements.
-	stableSort(result.Rows, less)
-}
-
-// stableSort sorts a slice of rows using a less function.
-func stableSort(rows []map[string]any, less func(i, j int) bool) {
-	n := len(rows)
-	for i := 1; i < n; i++ {
-		for j := i; j > 0 && less(j, j-1); j-- {
-			rows[j], rows[j-1] = rows[j-1], rows[j]
-		}
-	}
 }

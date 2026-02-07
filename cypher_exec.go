@@ -1127,6 +1127,9 @@ func evalExpr(e *Expression, bindings map[string]any) (any, error) {
 		if !ok {
 			return nil, fmt.Errorf("cypher exec: unbound variable %q", e.Object)
 		}
+		if obj == nil {
+			return nil, nil // OPTIONAL MATCH: unmatched binding
+		}
 		return getProperty(obj, e.Property), nil
 
 	case ExprFuncCall:
