@@ -49,7 +49,23 @@ func (db *DB) Cypher(query string) (*CypherResult, error) {
 		db.cache.put(query, ast)
 	}
 
-	return db.executeCypher(ast)
+	start := time.Now()
+	result, err := db.executeCypher(ast)
+	elapsed := time.Since(start)
+
+	if db.metrics != nil {
+		db.metrics.QueriesTotal.Add(1)
+		db.metrics.recordQueryDuration(elapsed)
+		if err != nil {
+			db.metrics.QueryErrorTotal.Add(1)
+		}
+	}
+
+	if err == nil {
+		db.slowQueryCheck(query, elapsed, len(result.Rows))
+	}
+
+	return result, err
 }
 
 // CypherWithParams parses and executes a parameterized Cypher query.
@@ -82,7 +98,23 @@ func (db *DB) CypherWithParams(query string, params map[string]any) (*CypherResu
 		return nil, err
 	}
 
-	return db.executeCypher(&resolved)
+	start := time.Now()
+	result, err := db.executeCypher(&resolved)
+	elapsed := time.Since(start)
+
+	if db.metrics != nil {
+		db.metrics.QueriesTotal.Add(1)
+		db.metrics.recordQueryDuration(elapsed)
+		if err != nil {
+			db.metrics.QueryErrorTotal.Add(1)
+		}
+	}
+
+	if err == nil {
+		db.slowQueryCheck(query, elapsed, len(result.Rows))
+	}
+
+	return result, err
 }
 
 // resolveParams substitutes $param references in the AST with actual values.

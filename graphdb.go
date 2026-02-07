@@ -30,6 +30,7 @@ type DB struct {
 	closed           atomic.Bool  // atomic flag — checked by every operation without locking
 	indexedProps     sync.Map     // map[string]bool — tracks which property names have secondary indexes
 	compositeIndexes sync.Map     // map[string]compositeIndexDef — tracks composite indexes
+	metrics          *Metrics     // operational counters (Prometheus-compatible)
 }
 
 // Open creates or opens a graph database at the given directory path.
@@ -79,6 +80,8 @@ func Open(dir string, opts Options) (*DB, error) {
 	// Discover existing property indexes from disk (survives restart).
 	db.discoverIndexes()
 	db.discoverCompositeIndexes()
+
+	db.metrics = newMetrics(db)
 
 	db.log.Info("database opened",
 		"dir", dir,
@@ -158,6 +161,12 @@ func (db *DB) Close() error {
 	}
 
 	return firstErr
+}
+
+// Metrics returns the operational metrics collector.
+// Use this to read counters or write Prometheus exposition format.
+func (db *DB) Metrics() *Metrics {
+	return db.metrics
 }
 
 // isClosed is a cheap inline check used by every public method.

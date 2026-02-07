@@ -84,6 +84,9 @@ func (db *DB) AddEdge(from, to NodeID, label string, props Props) (EdgeID, error
 			db.log.Error("failed to add edge", "from", from, "to", to, "label", label, "error", err)
 			return 0, fmt.Errorf("graphdb: failed to add edge: %w", err)
 		}
+		if db.metrics != nil {
+			db.metrics.EdgesCreated.Add(1)
+		}
 		db.log.Debug("edge added", "id", id, "from", from, "to", to, "label", label)
 		return id, nil
 	}
@@ -126,6 +129,9 @@ func (db *DB) AddEdge(from, to NodeID, label string, props Props) (EdgeID, error
 		return 0, fmt.Errorf("graphdb: failed to add edge (target shard adj_in): %w", err)
 	}
 
+	if db.metrics != nil {
+		db.metrics.EdgesCreated.Add(1)
+	}
 	db.log.Debug("edge added", "id", id, "from", from, "to", to, "label", label)
 	return id, nil
 }
@@ -322,6 +328,9 @@ func (db *DB) DeleteEdge(id EdgeID) error {
 	if err != nil {
 		db.log.Error("failed to delete edge", "id", id, "error", err)
 	} else {
+		if db.metrics != nil {
+			db.metrics.EdgesDeleted.Add(1)
+		}
 		db.log.Debug("edge deleted", "id", id, "from", edge.From, "to", edge.To, "label", edge.Label)
 	}
 	return err

@@ -59,6 +59,9 @@ func (db *DB) FindByProperty(propName string, value interface{}) ([]*Node, error
 	}
 
 	_, hasIndex := db.indexedProps.Load(propName)
+	if hasIndex && db.metrics != nil {
+		db.metrics.IndexLookups.Add(1)
+	}
 
 	idxKeyStr := fmt.Sprintf("%s:%v", propName, value)
 	prefix := encodeIndexPrefix(idxKeyStr)

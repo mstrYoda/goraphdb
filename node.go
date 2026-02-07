@@ -43,6 +43,9 @@ func (db *DB) AddNode(props Props) (NodeID, error) {
 	}
 
 	db.ncache.Put(&Node{ID: id, Props: props})
+	if db.metrics != nil {
+		db.metrics.NodesCreated.Add(1)
+	}
 	db.log.Debug("node added", "id", id)
 	return id, nil
 }
@@ -337,6 +340,9 @@ func (db *DB) DeleteNode(id NodeID) error {
 		db.log.Error("failed to delete node", "id", id, "error", err)
 	} else {
 		db.ncache.Invalidate(id)
+		if db.metrics != nil {
+			db.metrics.NodesDeleted.Add(1)
+		}
 		db.log.Debug("node deleted", "id", id, "edges_removed", len(edges))
 	}
 	return err
