@@ -11,6 +11,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -61,7 +62,7 @@ func main() {
 	// Find all people and what they wrote (if anything).
 	// Charlie and Diana wrote nothing, so their article column will be nil.
 	fmt.Println("--- MATCH (p:Person) OPTIONAL MATCH (p)-[:WROTE]->(a) RETURN p.name, a ---")
-	res, err := db.Cypher(`MATCH (p:Person) OPTIONAL MATCH (p)-[:WROTE]->(a) RETURN p.name, a`)
+	res, err := db.Cypher(context.Background(), `MATCH (p:Person) OPTIONAL MATCH (p)-[:WROTE]->(a) RETURN p.name, a`)
 	if err != nil {
 		log.Printf("Error: %v", err)
 	} else {
@@ -79,7 +80,7 @@ func main() {
 	// ── 2. OPTIONAL MATCH with relationship variable ────────────────
 	// Include the edge properties (year).
 	fmt.Println("\n--- MATCH (p:Person) OPTIONAL MATCH (p)-[r:WROTE]->(a) RETURN p.name, a, r ---")
-	res, err = db.Cypher(`MATCH (p:Person) OPTIONAL MATCH (p)-[r:WROTE]->(a) RETURN p.name, a, r`)
+	res, err = db.Cypher(context.Background(), `MATCH (p:Person) OPTIONAL MATCH (p)-[r:WROTE]->(a) RETURN p.name, a, r`)
 	if err != nil {
 		log.Printf("Error: %v", err)
 	} else {
@@ -101,7 +102,7 @@ func main() {
 	// ── 3. Compare with regular MATCH ───────────────────────────────
 	// Without OPTIONAL, only people who wrote something are returned.
 	fmt.Println("\n--- Regular MATCH (no OPTIONAL) — only authors shown ---")
-	res, err = db.Cypher(`MATCH (p:Person)-[:WROTE]->(a) RETURN p.name, a`)
+	res, err = db.Cypher(context.Background(), `MATCH (p:Person)-[:WROTE]->(a) RETURN p.name, a`)
 	if err != nil {
 		log.Printf("Error: %v", err)
 	} else {
@@ -116,7 +117,7 @@ func main() {
 	// ── 4. OPTIONAL MATCH with different edge type ──────────────────
 	// Find people and who they know (if anyone). Diana knows nobody outgoing.
 	fmt.Println("\n--- MATCH (p:Person) OPTIONAL MATCH (p)-[:KNOWS]->(f) RETURN p.name, f ---")
-	res, err = db.Cypher(`MATCH (p:Person) OPTIONAL MATCH (p)-[:KNOWS]->(f) RETURN p.name, f`)
+	res, err = db.Cypher(context.Background(), `MATCH (p:Person) OPTIONAL MATCH (p)-[:KNOWS]->(f) RETURN p.name, f`)
 	if err != nil {
 		log.Printf("Error: %v", err)
 	} else {

@@ -49,7 +49,7 @@ func TestCypher_MatchAllNodes(t *testing.T) {
 	db, _, _, _, _ := setupCypherTestDB(t)
 	defer db.Close()
 
-	result, err := db.Cypher(`MATCH (n) RETURN n`)
+	result, err := db.Cypher(context.Background(), `MATCH (n) RETURN n`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestCypher_MatchByProperty(t *testing.T) {
 	db, _, _, _, _ := setupCypherTestDB(t)
 	defer db.Close()
 
-	result, err := db.Cypher(`MATCH (n {name: "Alice"}) RETURN n`)
+	result, err := db.Cypher(context.Background(), `MATCH (n {name: "Alice"}) RETURN n`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +105,7 @@ func TestCypher_WhereClause(t *testing.T) {
 	db, _, _, _, _ := setupCypherTestDB(t)
 	defer db.Close()
 
-	result, err := db.Cypher(`MATCH (n) WHERE n.age > 25 RETURN n`)
+	result, err := db.Cypher(context.Background(), `MATCH (n) WHERE n.age > 25 RETURN n`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestCypher_WhereClauseAnd(t *testing.T) {
 	db, _, _, _, _ := setupCypherTestDB(t)
 	defer db.Close()
 
-	result, err := db.Cypher(`MATCH (n) WHERE n.age > 25 AND n.age < 32 RETURN n`)
+	result, err := db.Cypher(context.Background(), `MATCH (n) WHERE n.age > 25 AND n.age < 32 RETURN n`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +143,7 @@ func TestCypher_SingleHopPattern(t *testing.T) {
 	db, _, _, _, _ := setupCypherTestDB(t)
 	defer db.Close()
 
-	result, err := db.Cypher(`MATCH (a)-[:FOLLOWS]->(b) RETURN a, b`)
+	result, err := db.Cypher(context.Background(), `MATCH (a)-[:FOLLOWS]->(b) RETURN a, b`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +180,7 @@ func TestCypher_FilteredTraversal(t *testing.T) {
 	db, _, _, _, _ := setupCypherTestDB(t)
 	defer db.Close()
 
-	result, err := db.Cypher(`MATCH (a {name: "Alice"})-[:FOLLOWS]->(b) RETURN b.name`)
+	result, err := db.Cypher(context.Background(), `MATCH (a {name: "Alice"})-[:FOLLOWS]->(b) RETURN b.name`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +209,7 @@ func TestCypher_VariableLengthPath(t *testing.T) {
 	db, _, _, _, _ := setupCypherTestDB(t)
 	defer db.Close()
 
-	result, err := db.Cypher(`MATCH (a {name: "Alice"})-[:FOLLOWS*1..3]->(b) RETURN b`)
+	result, err := db.Cypher(context.Background(), `MATCH (a {name: "Alice"})-[:FOLLOWS*1..3]->(b) RETURN b`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +229,7 @@ func TestCypher_VariableLengthPathMinMax(t *testing.T) {
 	db, _, _, _, _ := setupCypherTestDB(t)
 	defer db.Close()
 
-	result, err := db.Cypher(`MATCH (a {name: "Alice"})-[:FOLLOWS*2..3]->(b) RETURN b`)
+	result, err := db.Cypher(context.Background(), `MATCH (a {name: "Alice"})-[:FOLLOWS*2..3]->(b) RETURN b`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,7 +249,7 @@ func TestCypher_AnyEdgeType(t *testing.T) {
 	defer db.Close()
 
 	// Query all outgoing edges from Alice (FOLLOWS→Bob, LIKES→Charlie).
-	result, err := db.Cypher(`MATCH (a {name: "Alice"})-[r]->(b) RETURN type(r), b`)
+	result, err := db.Cypher(context.Background(), `MATCH (a {name: "Alice"})-[r]->(b) RETURN type(r), b`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,7 +282,7 @@ func TestCypher_OrderByLimit(t *testing.T) {
 	db, _, _, _, _ := setupCypherTestDB(t)
 	defer db.Close()
 
-	result, err := db.Cypher(`MATCH (n) RETURN n ORDER BY n.age DESC LIMIT 2`)
+	result, err := db.Cypher(context.Background(), `MATCH (n) RETURN n ORDER BY n.age DESC LIMIT 2`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -311,7 +311,7 @@ func TestCypher_ReturnAlias(t *testing.T) {
 	db, _, _, _, _ := setupCypherTestDB(t)
 	defer db.Close()
 
-	result, err := db.Cypher(`MATCH (n {name: "Alice"}) RETURN n.name AS person_name`)
+	result, err := db.Cypher(context.Background(), `MATCH (n {name: "Alice"}) RETURN n.name AS person_name`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,10 +360,11 @@ func TestCypherLexer(t *testing.T) {
 }
 
 func TestCypherParser_SimpleNode(t *testing.T) {
-	q, err := parseCypher(`MATCH (n) RETURN n`)
+	parsed, err := parseCypher(`MATCH (n) RETURN n`)
 	if err != nil {
 		t.Fatal(err)
 	}
+	q := parsed.read
 
 	if len(q.Match.Pattern.Nodes) != 1 {
 		t.Fatalf("expected 1 node in pattern, got %d", len(q.Match.Pattern.Nodes))
@@ -374,10 +375,11 @@ func TestCypherParser_SimpleNode(t *testing.T) {
 }
 
 func TestCypherParser_RelPattern(t *testing.T) {
-	q, err := parseCypher(`MATCH (a)-[:FOLLOWS]->(b) RETURN a, b`)
+	parsed, err := parseCypher(`MATCH (a)-[:FOLLOWS]->(b) RETURN a, b`)
 	if err != nil {
 		t.Fatal(err)
 	}
+	q := parsed.read
 
 	if len(q.Match.Pattern.Nodes) != 2 {
 		t.Fatalf("expected 2 nodes, got %d", len(q.Match.Pattern.Nodes))
@@ -395,10 +397,11 @@ func TestCypherParser_RelPattern(t *testing.T) {
 }
 
 func TestCypherParser_VarLength(t *testing.T) {
-	q, err := parseCypher(`MATCH (a)-[:FOLLOWS*1..3]->(b) RETURN b`)
+	parsed, err := parseCypher(`MATCH (a)-[:FOLLOWS*1..3]->(b) RETURN b`)
 	if err != nil {
 		t.Fatal(err)
 	}
+	q := parsed.read
 
 	rel := q.Match.Pattern.Rels[0]
 	if !rel.VarLength {
@@ -413,10 +416,11 @@ func TestCypherParser_VarLength(t *testing.T) {
 }
 
 func TestCypherParser_Where(t *testing.T) {
-	q, err := parseCypher(`MATCH (n) WHERE n.age > 25 RETURN n`)
+	parsed, err := parseCypher(`MATCH (n) WHERE n.age > 25 RETURN n`)
 	if err != nil {
 		t.Fatal(err)
 	}
+	q := parsed.read
 
 	if q.Where == nil {
 		t.Fatal("expected WHERE clause")
@@ -437,7 +441,7 @@ func TestCypher_ErrorInvalidQuery(t *testing.T) {
 	db, _, _, _, _ := setupCypherTestDB(t)
 	defer db.Close()
 
-	_, err := db.Cypher(`INVALID QUERY`)
+	_, err := db.Cypher(context.Background(), `INVALID QUERY`)
 	if err == nil {
 		t.Fatal("expected error for invalid query")
 	}
@@ -447,7 +451,7 @@ func TestCypher_ErrorUnterminatedString(t *testing.T) {
 	db, _, _, _, _ := setupCypherTestDB(t)
 	defer db.Close()
 
-	_, err := db.Cypher(`MATCH (n {name: "Alice}) RETURN n`)
+	_, err := db.Cypher(context.Background(), `MATCH (n {name: "Alice}) RETURN n`)
 	if err == nil {
 		t.Fatal("expected error for unterminated string")
 	}
@@ -464,7 +468,7 @@ func TestCypher_Concurrent(t *testing.T) {
 	errc := make(chan error, 10)
 	for i := 0; i < 10; i++ {
 		go func() {
-			result, err := db.Cypher(`MATCH (n) WHERE n.age > 25 RETURN n`)
+			result, err := db.Cypher(context.Background(), `MATCH (n) WHERE n.age > 25 RETURN n`)
 			if err != nil {
 				errc <- err
 				return
@@ -498,7 +502,7 @@ func TestCypherCreate_SingleNode(t *testing.T) {
 	defer db.Close()
 
 	// CREATE (n:Person {name: "Alice", age: 30}) RETURN n
-	result, err := db.Cypher(`CREATE (n:Person {name: "Alice", age: 30}) RETURN n`)
+	result, err := db.Cypher(context.Background(), `CREATE (n:Person {name: "Alice", age: 30}) RETURN n`)
 	if err != nil {
 		t.Fatalf("CREATE failed: %v", err)
 	}
@@ -521,7 +525,7 @@ func TestCypherCreate_SingleNode(t *testing.T) {
 	}
 
 	// Verify the node persists — query it back.
-	readResult, err := db.Cypher(`MATCH (n:Person {name: "Alice"}) RETURN n.name, n.age`)
+	readResult, err := db.Cypher(context.Background(), `MATCH (n:Person {name: "Alice"}) RETURN n.name, n.age`)
 	if err != nil {
 		t.Fatalf("MATCH failed: %v", err)
 	}
@@ -549,7 +553,7 @@ func TestCypherCreate_NodeWithEdge(t *testing.T) {
 	defer db.Close()
 
 	// CREATE (a:Person {name: "Alice"})-[:FOLLOWS]->(b:Person {name: "Bob"}) RETURN a, b
-	result, err := db.Cypher(`CREATE (a:Person {name: "Alice"})-[:FOLLOWS]->(b:Person {name: "Bob"}) RETURN a, b`)
+	result, err := db.Cypher(context.Background(), `CREATE (a:Person {name: "Alice"})-[:FOLLOWS]->(b:Person {name: "Bob"}) RETURN a, b`)
 	if err != nil {
 		t.Fatalf("CREATE failed: %v", err)
 	}
@@ -574,7 +578,7 @@ func TestCypherCreate_NodeWithEdge(t *testing.T) {
 	}
 
 	// Verify via Cypher read.
-	readResult, err := db.Cypher(`MATCH (a:Person {name: "Alice"})-[:FOLLOWS]->(b) RETURN b.name`)
+	readResult, err := db.Cypher(context.Background(), `MATCH (a:Person {name: "Alice"})-[:FOLLOWS]->(b) RETURN b.name`)
 	if err != nil {
 		t.Fatalf("MATCH failed: %v", err)
 	}
@@ -596,7 +600,7 @@ func TestCypherCreate_MultiplePatterns(t *testing.T) {
 	defer db.Close()
 
 	// CREATE (a:Person {name: "Alice"}), (b:Person {name: "Bob"})
-	_, err = db.Cypher(`CREATE (a:Person {name: "Alice"}), (b:Person {name: "Bob"})`)
+	_, err = db.Cypher(context.Background(), `CREATE (a:Person {name: "Alice"}), (b:Person {name: "Bob"})`)
 	if err != nil {
 		t.Fatalf("CREATE failed: %v", err)
 	}
@@ -616,7 +620,7 @@ func TestCypherCreate_NoReturn(t *testing.T) {
 	}
 	defer db.Close()
 
-	result, err := db.Cypher(`CREATE (n:Movie {title: "The Matrix", year: 1999})`)
+	result, err := db.Cypher(context.Background(), `CREATE (n:Movie {title: "The Matrix", year: 1999})`)
 	if err != nil {
 		t.Fatalf("CREATE failed: %v", err)
 	}
@@ -625,7 +629,7 @@ func TestCypherCreate_NoReturn(t *testing.T) {
 	}
 
 	// Verify via MATCH.
-	readResult, err := db.Cypher(`MATCH (n:Movie) RETURN n.title`)
+	readResult, err := db.Cypher(context.Background(), `MATCH (n:Movie) RETURN n.title`)
 	if err != nil {
 		t.Fatalf("MATCH failed: %v", err)
 	}
@@ -646,7 +650,7 @@ func TestCypherCreate_ViaCreateAPI(t *testing.T) {
 	}
 	defer db.Close()
 
-	cr, err := db.CypherCreate(`CREATE (n:City {name: "Istanbul"}) RETURN n`)
+	cr, err := db.CypherCreate(context.Background(), `CREATE (n:City {name: "Istanbul"}) RETURN n`)
 	if err != nil {
 		t.Fatalf("CypherCreate failed: %v", err)
 	}
@@ -685,7 +689,7 @@ func TestCypherContext_Timeout(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel before query
 
-	_, err = db.CypherContext(ctx, `MATCH (n) RETURN n`)
+	_, err = db.Cypher(ctx, `MATCH (n) RETURN n`)
 	if err == nil {
 		t.Fatal("expected error from cancelled context, got nil")
 	}
@@ -698,7 +702,7 @@ func TestCypherContext_Timeout(t *testing.T) {
 	defer cancel2()
 	time.Sleep(5 * time.Millisecond) // ensure deadline has passed
 
-	_, err = db.CypherContext(ctx2, `MATCH (n) RETURN n`)
+	_, err = db.Cypher(ctx2, `MATCH (n) RETURN n`)
 	if err == nil {
 		t.Fatal("expected error from expired context, got nil")
 	}
@@ -707,7 +711,7 @@ func TestCypherContext_Timeout(t *testing.T) {
 	}
 
 	// Verify a normal context still works.
-	result, err := db.CypherContext(context.Background(), `MATCH (n) RETURN n LIMIT 5`)
+	result, err := db.Cypher(context.Background(), `MATCH (n) RETURN n LIMIT 5`)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

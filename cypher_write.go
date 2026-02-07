@@ -179,19 +179,14 @@ func (db *DB) executeCreatePattern(ctx context.Context, cp CreatePattern, bindin
 }
 
 // CypherCreate executes a CREATE Cypher query string.
+// Accepts a context.Context for timeout/cancellation.
 // Returns the result with creation statistics and optional RETURN data.
-func (db *DB) CypherCreate(query string) (*CypherCreateResult, error) {
-	return db.CypherCreateContext(context.Background(), query)
-}
-
-// CypherCreateContext is like CypherCreate but accepts a context for
-// timeout/cancellation.
-func (db *DB) CypherCreateContext(ctx context.Context, query string) (*CypherCreateResult, error) {
+func (db *DB) CypherCreate(ctx context.Context, query string) (*CypherCreateResult, error) {
 	if db.isClosed() {
 		return nil, fmt.Errorf("graphdb: database is closed")
 	}
 
-	parsed, err := parseCypherAny(query)
+	parsed, err := parseCypher(query)
 	if err != nil {
 		return nil, err
 	}

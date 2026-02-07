@@ -244,7 +244,7 @@ func (s *Server) handleCypher(w http.ResponseWriter, r *http.Request) {
 	}
 
 	start := time.Now()
-	result, err := s.db.Cypher(req.Query)
+	result, err := s.db.Cypher(r.Context(), req.Query)
 	elapsed := time.Since(start)
 	if err != nil {
 		writeError(w, 400, err.Error())
@@ -368,9 +368,9 @@ func (s *Server) handleCypherStream(w http.ResponseWriter, r *http.Request) {
 	var iter graphdb.RowIterator
 	var err error
 	if len(req.Params) > 0 {
-		iter, err = s.db.CypherStreamWithParams(req.Query, req.Params)
+		iter, err = s.db.CypherStreamWithParams(r.Context(), req.Query, req.Params)
 	} else {
-		iter, err = s.db.CypherStream(req.Query)
+		iter, err = s.db.CypherStream(r.Context(), req.Query)
 	}
 	if err != nil {
 		writeError(w, 400, err.Error())
@@ -465,9 +465,9 @@ func (s *Server) handleCypherExecute(w http.ResponseWriter, r *http.Request) {
 	var result *graphdb.CypherResult
 	var err error
 	if len(req.Params) > 0 {
-		result, err = s.db.ExecutePreparedWithParams(pq, req.Params)
+		result, err = s.db.ExecutePreparedWithParams(r.Context(), pq, req.Params)
 	} else {
-		result, err = s.db.ExecutePrepared(pq)
+		result, err = s.db.ExecutePrepared(r.Context(), pq)
 	}
 	elapsed := time.Since(start)
 

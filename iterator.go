@@ -45,37 +45,43 @@ type RowIterator interface {
 // time without full materialization, giving O(1) memory and fast time-to-first-row.
 //
 // The caller MUST call Close() on the returned iterator.
-func (db *DB) CypherStream(query string) (RowIterator, error) {
+func (db *DB) CypherStream(ctx context.Context, query string) (RowIterator, error) {
 	if db.isClosed() {
 		return nil, fmt.Errorf("graphdb: database is closed")
 	}
 
 	ast := db.cache.get(query)
 	if ast == nil {
-		var err error
-		ast, err = parseCypher(query)
+		parsed, err := parseCypher(query)
 		if err != nil {
 			return nil, err
 		}
+		if parsed.write != nil {
+			return nil, fmt.Errorf("graphdb: CypherStream does not support CREATE queries")
+		}
+		ast = parsed.read
 		db.cache.put(query, ast)
 	}
 
-	return db.buildIterator(ast)
+	return db.buildIterator(ctx, ast)
 }
 
 // CypherStreamWithParams is the parameterized version of CypherStream.
-func (db *DB) CypherStreamWithParams(query string, params map[string]any) (RowIterator, error) {
+func (db *DB) CypherStreamWithParams(ctx context.Context, query string, params map[string]any) (RowIterator, error) {
 	if db.isClosed() {
 		return nil, fmt.Errorf("graphdb: database is closed")
 	}
 
 	ast := db.cache.get(query)
 	if ast == nil {
-		var err error
-		ast, err = parseCypher(query)
+		parsed, err := parseCypher(query)
 		if err != nil {
 			return nil, err
 		}
+		if parsed.write != nil {
+			return nil, fmt.Errorf("graphdb: CypherStreamWithParams does not support CREATE queries")
+		}
+		ast = parsed.read
 		db.cache.put(query, ast)
 	}
 
@@ -85,15 +91,15 @@ func (db *DB) CypherStreamWithParams(query string, params map[string]any) (RowIt
 			return nil, err
 		}
 	}
-	return db.buildIterator(&resolved)
+	return db.buildIterator(ctx, &resolved)
 }
 
 // buildIterator constructs a RowIterator for the given parsed query.
 // For EXPLAIN-only queries, returns nil (caller should use Cypher() instead).
-func (db *DB) buildIterator(q *CypherQuery) (RowIterator, error) {
+func (db *DB) buildIterator(ctx context.Context, q *CypherQuery) (RowIterator, error) {
 	// EXPLAIN/PROFILE queries don't stream — fall back to materialized.
 	if q.Explain != ExplainNone {
-		result, err := db.executeCypher(context.Background(), q)
+		result, err := db.executeCypher(ctx, q)
 		if err != nil {
 			return nil, err
 		}
@@ -102,7 +108,7 @@ func (db *DB) buildIterator(q *CypherQuery) (RowIterator, error) {
 
 	// OPTIONAL MATCH — fall back to materialized (complex join logic).
 	if q.OptionalMatch != nil {
-		result, err := db.executeCypherNormal(context.Background(), q)
+		result, err := db.executeCypherNormal(ctx, q)
 		if err != nil {
 			return nil, err
 		}
@@ -118,7 +124,7 @@ func (db *DB) buildIterator(q *CypherQuery) (RowIterator, error) {
 	case len(pat.Nodes) == 2 && len(pat.Rels) == 1:
 		// For pattern matches, fall back to materialized for now.
 		// The scan-level streaming is already the biggest win (node match).
-		result, err := db.executeCypherNormal(context.Background(), q)
+		result, err := db.executeCypherNormal(ctx, q)
 		if err != nil {
 			return nil, err
 		}
@@ -150,7 +156,7 @@ func (db *DB) buildNodeMatchIterator(q *CypherQuery) (RowIterator, error) {
 
 	// If ORDER BY is present, we must materialize to sort.
 	if len(q.OrderBy) > 0 {
-		result, err := db.executeCypherNormal(context.Background(), q)
+		result, err := db.executeCypherNormal(context.Background(), q) // no ctx needed — already materialized
 		if err != nil {
 			return nil, err
 		}

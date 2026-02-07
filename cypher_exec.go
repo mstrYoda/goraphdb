@@ -32,20 +32,17 @@ type CypherResult struct {
 }
 
 // Cypher parses and executes a Cypher query string against the database.
-// Identical query strings are cached after the first parse (lock-free).
-// Safe for concurrent use.
-func (db *DB) Cypher(query string) (*CypherResult, error) {
-	return db.CypherContext(context.Background(), query)
-}
-
-// CypherContext is like Cypher but accepts a context for timeout/cancellation.
-// The context is checked at key iteration points; a cancelled context causes
-// the query to return immediately with the context error.
+// Accepts a context.Context for timeout/cancellation — the context is checked
+// at key iteration points; a cancelled context returns immediately with the
+// context error.
 //
 // Supports both read (MATCH) and write (CREATE) queries. For CREATE queries,
 // the result contains the created entities in Rows and creation statistics
 // are tracked via metrics.
-func (db *DB) CypherContext(ctx context.Context, query string) (*CypherResult, error) {
+//
+// Identical read query strings are cached after the first parse (lock-free).
+// Safe for concurrent use.
+func (db *DB) Cypher(ctx context.Context, query string) (*CypherResult, error) {
 	if db.isClosed() {
 		return nil, fmt.Errorf("graphdb: database is closed")
 	}
@@ -57,7 +54,7 @@ func (db *DB) CypherContext(ctx context.Context, query string) (*CypherResult, e
 	}
 
 	// Parse — may be read or write.
-	parsed, err := parseCypherAny(query)
+	parsed, err := parseCypher(query)
 	if err != nil {
 		return nil, err
 	}
@@ -111,32 +108,30 @@ func (db *DB) executeCypherRead(ctx context.Context, query string, ast *CypherQu
 }
 
 // CypherWithParams parses and executes a parameterized Cypher query.
+// Accepts a context.Context for timeout/cancellation.
 // Parameters are referenced in the query as $name and resolved from the params map.
 //
 // Example:
 //
-//	db.CypherWithParams(
+//	db.CypherWithParams(ctx,
 //	    "MATCH (n {name: $name}) WHERE n.age > $minAge RETURN n",
 //	    map[string]any{"name": "Alice", "minAge": 25},
 //	)
-func (db *DB) CypherWithParams(query string, params map[string]any) (*CypherResult, error) {
-	return db.CypherWithParamsContext(context.Background(), query, params)
-}
-
-// CypherWithParamsContext is like CypherWithParams but accepts a context for
-// timeout/cancellation.
-func (db *DB) CypherWithParamsContext(ctx context.Context, query string, params map[string]any) (*CypherResult, error) {
+func (db *DB) CypherWithParams(ctx context.Context, query string, params map[string]any) (*CypherResult, error) {
 	if db.isClosed() {
 		return nil, fmt.Errorf("graphdb: database is closed")
 	}
 
 	ast := db.cache.get(query)
 	if ast == nil {
-		var err error
-		ast, err = parseCypher(query)
+		parsed, err := parseCypher(query)
 		if err != nil {
 			return nil, err
 		}
+		if parsed.write != nil {
+			return nil, fmt.Errorf("cypher exec: parameterized CREATE queries are not supported")
+		}
+		ast = parsed.read
 		db.cache.put(query, ast)
 	}
 

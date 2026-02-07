@@ -46,23 +46,9 @@ type parsedCypher struct {
 	write *CypherWrite // non-nil for CREATE queries
 }
 
-// parseCypher is the entry point: tokenise + parse a Cypher read query string.
-// For backwards compatibility, this only parses MATCH queries.
-func parseCypher(input string) (*CypherQuery, error) {
-	tokens, err := tokenize(input)
-	if err != nil {
-		return nil, err
-	}
-	p := &parser{tokens: tokens}
-	// Check if it's a CREATE query.
-	if p.is(tokCreate) {
-		return nil, fmt.Errorf("cypher parser: use parseCypherAny for CREATE queries")
-	}
-	return p.parseQuery()
-}
-
-// parseCypherAny parses either a read (MATCH) or write (CREATE) query.
-func parseCypherAny(input string) (*parsedCypher, error) {
+// parseCypher is the entry point: tokenise + parse a Cypher query string.
+// Returns a parsedCypher with either .read or .write populated.
+func parseCypher(input string) (*parsedCypher, error) {
 	tokens, err := tokenize(input)
 	if err != nil {
 		return nil, err

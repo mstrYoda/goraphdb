@@ -8,6 +8,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -63,7 +64,7 @@ func main() {
 
 	// Cypher query.
 	fmt.Println("\nCypher: MATCH (a {name: \"Alice\"})-[:follows]->(b) RETURN b.name")
-	res, err := db.Cypher(`MATCH (a {name: "Alice"})-[:follows]->(b) RETURN b.name`)
+	res, err := db.Cypher(context.Background(), `MATCH (a {name: "Alice"})-[:follows]->(b) RETURN b.name`)
 	if err != nil {
 		log.Fatal(err)
 	}

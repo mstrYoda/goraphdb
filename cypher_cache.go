@@ -181,33 +181,38 @@ func (db *DB) PrepareCypher(query string) (*PreparedQuery, error) {
 	}
 
 	// Parse and cache.
-	ast, err := parseCypher(query)
+	parsed, err := parseCypher(query)
 	if err != nil {
 		return nil, err
 	}
+	if parsed.write != nil {
+		return nil, fmt.Errorf("graphdb: PrepareCypher does not support CREATE queries")
+	}
 
-	db.cache.put(query, ast)
-	return &PreparedQuery{raw: query, ast: ast}, nil
+	db.cache.put(query, parsed.read)
+	return &PreparedQuery{raw: query, ast: parsed.read}, nil
 }
 
 // ExecutePrepared executes a previously prepared Cypher query.
+// Accepts a context.Context for timeout/cancellation.
 // Safe for concurrent use.
-func (db *DB) ExecutePrepared(pq *PreparedQuery) (*CypherResult, error) {
+func (db *DB) ExecutePrepared(ctx context.Context, pq *PreparedQuery) (*CypherResult, error) {
 	if db.isClosed() {
 		return nil, fmt.Errorf("graphdb: database is closed")
 	}
-	return db.executeCypher(context.Background(), pq.ast)
+	return db.executeCypher(ctx, pq.ast)
 }
 
 // ExecutePreparedWithParams executes a prepared query with parameter substitution.
+// Accepts a context.Context for timeout/cancellation.
 // The cached AST is deep-copied before parameter resolution so it remains immutable.
 // Safe for concurrent use.
-func (db *DB) ExecutePreparedWithParams(pq *PreparedQuery, params map[string]any) (*CypherResult, error) {
+func (db *DB) ExecutePreparedWithParams(ctx context.Context, pq *PreparedQuery, params map[string]any) (*CypherResult, error) {
 	if db.isClosed() {
 		return nil, fmt.Errorf("graphdb: database is closed")
 	}
 	if len(params) == 0 {
-		return db.executeCypher(context.Background(), pq.ast)
+		return db.executeCypher(ctx, pq.ast)
 	}
 
 	// Deep-copy and resolve parameters so the cached AST is not mutated.
@@ -215,7 +220,7 @@ func (db *DB) ExecutePreparedWithParams(pq *PreparedQuery, params map[string]any
 	if err := resolveParams(&resolved, params); err != nil {
 		return nil, err
 	}
-	return db.executeCypher(context.Background(), &resolved)
+	return db.executeCypher(ctx, &resolved)
 }
 
 // QueryCacheStats returns statistics about the query plan cache.

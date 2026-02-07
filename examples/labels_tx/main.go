@@ -11,6 +11,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -100,7 +101,7 @@ func main() {
 
 	// Cypher with labels.
 	fmt.Println("\n--- Cypher with Labels ---")
-	res, err := db.Cypher(`MATCH (p:Person) RETURN p`)
+	res, err := db.Cypher(context.Background(), `MATCH (p:Person) RETURN p`)
 	if err != nil {
 		log.Printf("  Error: %v", err)
 	} else {
@@ -112,7 +113,7 @@ func main() {
 		}
 	}
 
-	res, err = db.Cypher(`MATCH (m:Movie) RETURN m`)
+	res, err = db.Cypher(context.Background(), `MATCH (m:Movie) RETURN m`)
 	if err != nil {
 		log.Printf("  Error: %v", err)
 	} else {
@@ -169,7 +170,7 @@ func main() {
 	db.CreateIndex("name")
 
 	// Simple parameter substitution.
-	res, err = db.CypherWithParams(
+	res, err = db.CypherWithParams(context.Background(),
 		`MATCH (n {name: $name}) RETURN n`,
 		map[string]any{"name": "Alice"},
 	)
@@ -185,7 +186,7 @@ func main() {
 	}
 
 	// WHERE clause with parameter.
-	res, err = db.CypherWithParams(
+	res, err = db.CypherWithParams(context.Background(),
 		`MATCH (n) WHERE n.age > $minAge RETURN n`,
 		map[string]any{"minAge": 30},
 	)

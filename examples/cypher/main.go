@@ -11,6 +11,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -68,7 +69,7 @@ func main() {
 
 	// ── 1. All nodes ─────────────────────────────────────────────────
 	fmt.Println("\n--- MATCH (n) RETURN n ---")
-	res, err := db.Cypher(`MATCH (n) RETURN n`)
+	res, err := db.Cypher(context.Background(), `MATCH (n) RETURN n`)
 	if err != nil {
 		log.Printf("Error: %v", err)
 	} else {
@@ -82,7 +83,7 @@ func main() {
 
 	// ── 2. Property filter ───────────────────────────────────────────
 	fmt.Println("\n--- MATCH (n {name: \"Alice\"}) RETURN n ---")
-	res, err = db.Cypher(`MATCH (n {name: "Alice"}) RETURN n`)
+	res, err = db.Cypher(context.Background(), `MATCH (n {name: "Alice"}) RETURN n`)
 	if err != nil {
 		log.Printf("Error: %v", err)
 	} else {
@@ -95,7 +96,7 @@ func main() {
 
 	// ── 3. WHERE clause ──────────────────────────────────────────────
 	fmt.Println("\n--- MATCH (n) WHERE n.age > 30 RETURN n ---")
-	res, err = db.Cypher(`MATCH (n) WHERE n.age > 30 RETURN n`)
+	res, err = db.Cypher(context.Background(), `MATCH (n) WHERE n.age > 30 RETURN n`)
 	if err != nil {
 		log.Printf("Error: %v", err)
 	} else {
@@ -109,7 +110,7 @@ func main() {
 
 	// ── 4. 1-hop pattern ─────────────────────────────────────────────
 	fmt.Println("\n--- MATCH (a)-[:follows]->(b) RETURN a, b ---")
-	res, err = db.Cypher(`MATCH (a)-[:follows]->(b) RETURN a, b`)
+	res, err = db.Cypher(context.Background(), `MATCH (a)-[:follows]->(b) RETURN a, b`)
 	if err != nil {
 		log.Printf("Error: %v", err)
 	} else {
@@ -123,7 +124,7 @@ func main() {
 
 	// ── 5. Filtered traversal ────────────────────────────────────────
 	fmt.Println("\n--- MATCH (a {name: \"Alice\"})-[:follows]->(b) RETURN b.name ---")
-	res, err = db.Cypher(`MATCH (a {name: "Alice"})-[:follows]->(b) RETURN b.name`)
+	res, err = db.Cypher(context.Background(), `MATCH (a {name: "Alice"})-[:follows]->(b) RETURN b.name`)
 	if err != nil {
 		log.Printf("Error: %v", err)
 	} else {
@@ -134,7 +135,7 @@ func main() {
 
 	// ── 6. Variable-length path ──────────────────────────────────────
 	fmt.Println("\n--- MATCH (a {name: \"Alice\"})-[:follows*1..2]->(b) RETURN b ---")
-	res, err = db.Cypher(`MATCH (a {name: "Alice"})-[:follows*1..2]->(b) RETURN b`)
+	res, err = db.Cypher(context.Background(), `MATCH (a {name: "Alice"})-[:follows*1..2]->(b) RETURN b`)
 	if err != nil {
 		log.Printf("Error: %v", err)
 	} else {
@@ -148,7 +149,7 @@ func main() {
 
 	// ── 7. Any edge type + type() ────────────────────────────────────
 	fmt.Println("\n--- MATCH (a {name: \"Alice\"})-[r]->(b) RETURN type(r), b.name ---")
-	res, err = db.Cypher(`MATCH (a {name: "Alice"})-[r]->(b) RETURN type(r), b.name`)
+	res, err = db.Cypher(context.Background(), `MATCH (a {name: "Alice"})-[r]->(b) RETURN type(r), b.name`)
 	if err != nil {
 		log.Printf("Error: %v", err)
 	} else {
@@ -159,7 +160,7 @@ func main() {
 
 	// ── 8. ORDER BY + LIMIT ──────────────────────────────────────────
 	fmt.Println("\n--- MATCH (n) WHERE n.age > 0 RETURN n ORDER BY n.age DESC LIMIT 3 ---")
-	res, err = db.Cypher(`MATCH (n) WHERE n.age > 0 RETURN n ORDER BY n.age DESC LIMIT 3`)
+	res, err = db.Cypher(context.Background(), `MATCH (n) WHERE n.age > 0 RETURN n ORDER BY n.age DESC LIMIT 3`)
 	if err != nil {
 		log.Printf("Error: %v", err)
 	} else {
@@ -172,7 +173,7 @@ func main() {
 
 	// ── 9. Aliases in RETURN ─────────────────────────────────────────
 	fmt.Println("\n--- MATCH (n {name: \"Bob\"}) RETURN n.name AS person, n.role AS job ---")
-	res, err = db.Cypher(`MATCH (n {name: "Bob"}) RETURN n.name AS person, n.role AS job`)
+	res, err = db.Cypher(context.Background(), `MATCH (n {name: "Bob"}) RETURN n.name AS person, n.role AS job`)
 	if err != nil {
 		log.Printf("Error: %v", err)
 	} else {
@@ -189,7 +190,7 @@ func main() {
 		log.Printf("Error: %v", err)
 	} else {
 		fmt.Printf("  Prepared: %s\n", pq)
-		res, err = db.ExecutePrepared(pq)
+		res, err = db.ExecutePrepared(context.Background(), pq)
 		if err != nil {
 			log.Printf("Error: %v", err)
 		} else {

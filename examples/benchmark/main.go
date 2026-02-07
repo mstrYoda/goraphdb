@@ -9,6 +9,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"math/rand"
@@ -48,21 +49,21 @@ func main() {
 
 	start := time.Now()
 	for i := 0; i < 1000; i++ {
-		db.Cypher(`MATCH (n {name: "Alice"}) RETURN n`)
+		db.Cypher(context.Background(), `MATCH (n {name: "Alice"}) RETURN n`)
 	}
 	fmt.Printf("  Property filter × 1,000       → %v  (%.1f µs/query)\n",
 		time.Since(start), float64(time.Since(start).Microseconds())/1000.0)
 
 	start = time.Now()
 	for i := 0; i < 1000; i++ {
-		db.Cypher(`MATCH (n) WHERE n.age > 25 RETURN n`)
+		db.Cypher(context.Background(), `MATCH (n) WHERE n.age > 25 RETURN n`)
 	}
 	fmt.Printf("  WHERE clause × 1,000          → %v  (%.1f µs/query)\n",
 		time.Since(start), float64(time.Since(start).Microseconds())/1000.0)
 
 	start = time.Now()
 	for i := 0; i < 1000; i++ {
-		db.Cypher(`MATCH (a {name: "Alice"})-[:follows]->(b) RETURN b`)
+		db.Cypher(context.Background(), `MATCH (a {name: "Alice"})-[:follows]->(b) RETURN b`)
 	}
 	fmt.Printf("  1-hop pattern × 1,000         → %v  (%.1f µs/query)\n",
 		time.Since(start), float64(time.Since(start).Microseconds())/1000.0)
@@ -211,7 +212,7 @@ func main() {
 	// Single-query benchmarks
 	bench := func(label, query string) {
 		start = time.Now()
-		res, _ := db.Cypher(query)
+		res, _ := db.Cypher(context.Background(), query)
 		fmt.Printf("  %-40s → %d rows in %v\n", label, len(res.Rows), time.Since(start))
 	}
 
@@ -233,7 +234,7 @@ func main() {
 
 	// ORDER BY + LIMIT (heap-based top-K)
 	start = time.Now()
-	res, _ := db.Cypher(`MATCH (n) WHERE n.age > 0 RETURN n ORDER BY n.age DESC LIMIT 10`)
+	res, _ := db.Cypher(context.Background(), `MATCH (n) WHERE n.age > 0 RETURN n ORDER BY n.age DESC LIMIT 10`)
 	fmt.Printf("  %-40s → %d rows in %v\n", "ORDER BY + LIMIT (heap top-K)", len(res.Rows), time.Since(start))
 	for _, row := range res.Rows {
 		if n, ok := row["n"].(*graphdb.Node); ok {
@@ -264,7 +265,7 @@ func main() {
 		}
 		start = time.Now()
 		for i := 0; i < 1000; i++ {
-			db.ExecutePrepared(pq)
+			db.ExecutePrepared(context.Background(), pq)
 		}
 		dur := time.Since(start)
 		fmt.Printf("  %-35s → %v  (%.1f µs/query)\n",
@@ -277,7 +278,7 @@ func main() {
 
 	start = time.Now()
 	for i := 0; i < 10_000; i++ {
-		db.Cypher(cacheQ)
+		db.Cypher(context.Background(), cacheQ)
 	}
 	cypherDur := time.Since(start)
 	fmt.Printf("  db.Cypher()          → %v  (%.1f µs/query)\n",
@@ -286,7 +287,7 @@ func main() {
 	pqCache, _ := db.PrepareCypher(cacheQ)
 	start = time.Now()
 	for i := 0; i < 10_000; i++ {
-		db.ExecutePrepared(pqCache)
+		db.ExecutePrepared(context.Background(), pqCache)
 	}
 	prepDur := time.Since(start)
 	fmt.Printf("  db.ExecutePrepared() → %v  (%.1f µs/query)\n",
@@ -309,7 +310,7 @@ func main() {
 	for _, q := range concQueries {
 		for j := 0; j < concRuns; j++ {
 			go func(query string) {
-				db.Cypher(query)
+				db.Cypher(context.Background(), query)
 				done <- struct{}{}
 			}(q)
 		}

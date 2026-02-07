@@ -81,7 +81,8 @@ func main() {
     }
 
     // Cypher query.
-    res, _ := db.Cypher(`MATCH (a {name: "Alice"})-[:follows]->(b) RETURN b.name`)
+    ctx := context.Background()
+    res, _ := db.Cypher(ctx, `MATCH (a {name: "Alice"})-[:follows]->(b) RETURN b.name`)
     for _, row := range res.Rows {
         fmt.Println(row["b.name"]) // Bob
     }
@@ -287,12 +288,14 @@ err = db.DropCompositeIndex("city", "age")
 // Prepare a parameterized query (parsed once, cached)
 pq, err := db.PrepareCypher("MATCH (n {name: $name}) RETURN n")
 
+ctx := context.Background()
+
 // Execute with different parameters — no re-parsing
-result, err := db.ExecutePreparedWithParams(pq, map[string]any{"name": "Alice"})
-result, err := db.ExecutePreparedWithParams(pq, map[string]any{"name": "Bob"})
+result, err := db.ExecutePreparedWithParams(ctx, pq, map[string]any{"name": "Alice"})
+result, err = db.ExecutePreparedWithParams(ctx, pq, map[string]any{"name": "Bob"})
 
 // Execute without parameters
-result, err := db.ExecutePrepared(pq)
+result, err = db.ExecutePrepared(ctx, pq)
 
 // Query cache statistics (bounded LRU, default 10K entries)
 stats := db.QueryCacheStats()
@@ -302,8 +305,10 @@ fmt.Printf("hits=%d misses=%d entries=%d\n", stats.Hits, stats.Misses, stats.Ent
 ### Streaming Results (Iterator)
 
 ```go
+ctx := context.Background()
+
 // CypherStream returns a lazy RowIterator — O(1) memory for non-sorted queries.
-iter, err := db.CypherStream("MATCH (n) RETURN n.name LIMIT 100")
+iter, err := db.CypherStream(ctx, "MATCH (n) RETURN n.name LIMIT 100")
 if err != nil {
     log.Fatal(err)
 }
@@ -318,7 +323,7 @@ if err := iter.Err(); err != nil {
 }
 
 // Parameterized streaming
-iter, err = db.CypherStreamWithParams(
+iter, err = db.CypherStreamWithParams(ctx,
     "MATCH (n {city: $city}) RETURN n.name",
     map[string]any{"city": "Istanbul"},
 )
@@ -327,23 +332,23 @@ iter, err = db.CypherStreamWithParams(
 ### Write Cypher (CREATE)
 
 ```go
-// CREATE works through the unified Cypher() API — no separate function needed.
+ctx := context.Background()
 
-// Create a single node with labels and properties.
-result, err := db.Cypher(`CREATE (n:Person {name: "Alice", age: 30}) RETURN n`)
+// CREATE works through the unified Cypher() API — no separate function needed.
+result, err := db.Cypher(ctx, `CREATE (n:Person {name: "Alice", age: 30}) RETURN n`)
 node := result.Rows[0]["n"].(*graphdb.Node) // access created node
 
 // Create two nodes and an edge in one statement.
-db.Cypher(`CREATE (a:Person {name: "Alice"})-[:FOLLOWS]->(b:Person {name: "Bob"})`)
+db.Cypher(ctx, `CREATE (a:Person {name: "Alice"})-[:FOLLOWS]->(b:Person {name: "Bob"})`)
 
 // Multiple comma-separated patterns.
-db.Cypher(`CREATE (a:City {name: "Istanbul"}), (b:City {name: "Ankara"})`)
+db.Cypher(ctx, `CREATE (a:City {name: "Istanbul"}), (b:City {name: "Ankara"})`)
 
 // CREATE without RETURN — fire-and-forget.
-db.Cypher(`CREATE (n:Movie {title: "The Matrix", year: 1999})`)
+db.Cypher(ctx, `CREATE (n:Movie {title: "The Matrix", year: 1999})`)
 
 // Dedicated API with creation statistics.
-cr, _ := db.CypherCreate(`CREATE (n:Person {name: "Eve"}) RETURN n`)
+cr, _ := db.CypherCreate(ctx, `CREATE (n:Person {name: "Eve"}) RETURN n`)
 fmt.Println(cr.Stats.NodesCreated) // 1
 fmt.Println(cr.Stats.LabelsSet)    // 1
 fmt.Println(cr.Stats.PropsSet)     // 1
@@ -352,20 +357,20 @@ fmt.Println(cr.Stats.PropsSet)     // 1
 ### Query Timeout & Cancellation
 
 ```go
-// CypherContext accepts a context.Context for timeout/cancellation.
-// The context is checked at key iteration points (full scans, edge traversals,
-// index scans) — a cancelled context returns immediately with the context error.
+// All query methods accept context.Context as the first argument for
+// timeout/cancellation. The context is checked at key iteration points
+// (full scans, edge traversals, index scans).
 
 ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 defer cancel()
 
-result, err := db.CypherContext(ctx, `MATCH (n) RETURN n`)
+result, err := db.Cypher(ctx, `MATCH (n) RETURN n`)
 if errors.Is(err, context.DeadlineExceeded) {
     log.Println("query timed out")
 }
 
-// Parameterized version also available:
-result, err = db.CypherWithParamsContext(ctx,
+// Parameterized queries also accept context:
+result, err = db.CypherWithParams(ctx,
     "MATCH (n {name: $name}) RETURN n",
     map[string]any{"name": "Alice"},
 )
@@ -470,40 +475,42 @@ GraphDB supports a read-only subset of the [Cypher](https://neo4j.com/docs/cyphe
 #### Supported Patterns
 
 ```go
+ctx := context.Background()
+
 // 1. All nodes
-res, _ := db.Cypher(`MATCH (n) RETURN n`)
+res, _ := db.Cypher(ctx, `MATCH (n) RETURN n`)
 
 // 2. Property filter (uses index if available)
-res, _ := db.Cypher(`MATCH (n {name: "Alice"}) RETURN n`)
+res, _ = db.Cypher(ctx, `MATCH (n {name: "Alice"}) RETURN n`)
 
 // 3. WHERE clause
-res, _ := db.Cypher(`MATCH (n) WHERE n.age > 25 RETURN n`)
+res, _ = db.Cypher(ctx, `MATCH (n) WHERE n.age > 25 RETURN n`)
 
 // 4. Single-hop pattern match
-res, _ := db.Cypher(`MATCH (a)-[:follows]->(b) RETURN a, b`)
+res, _ = db.Cypher(ctx, `MATCH (a)-[:follows]->(b) RETURN a, b`)
 
 // 5. Filtered traversal with property projection
-res, _ := db.Cypher(`MATCH (a {name: "Alice"})-[:follows]->(b) RETURN b.name`)
+res, _ = db.Cypher(ctx, `MATCH (a {name: "Alice"})-[:follows]->(b) RETURN b.name`)
 
 // 6. Variable-length path (1 to 3 hops)
-res, _ := db.Cypher(`MATCH (a)-[:follows*1..3]->(b) RETURN b`)
+res, _ = db.Cypher(ctx, `MATCH (a)-[:follows*1..3]->(b) RETURN b`)
 
 // 7. Any edge type with type() function
-res, _ := db.Cypher(`MATCH (a)-[r]->(b) RETURN type(r), b`)
+res, _ = db.Cypher(ctx, `MATCH (a)-[r]->(b) RETURN type(r), b`)
 
 // 8. Label-based matching (index-backed)
-res, _ := db.Cypher(`MATCH (n:Person) RETURN n`)
-res, _ = db.Cypher(`MATCH (a:Person)-[:follows]->(b:Person) RETURN a, b`)
+res, _ = db.Cypher(ctx, `MATCH (n:Person) RETURN n`)
+res, _ = db.Cypher(ctx, `MATCH (a:Person)-[:follows]->(b:Person) RETURN a, b`)
 
 // 9. OPTIONAL MATCH — left-outer-join (nil when no match)
-res, _ = db.Cypher(`MATCH (n:Person) OPTIONAL MATCH (n)-[r:WROTE]->(b) RETURN n.name, b`)
+res, _ = db.Cypher(ctx, `MATCH (n:Person) OPTIONAL MATCH (n)-[r:WROTE]->(b) RETURN n.name, b`)
 ```
 
 #### EXPLAIN / PROFILE
 
 ```go
 // EXPLAIN — returns the query plan without executing (zero I/O)
-res, _ := db.Cypher(`EXPLAIN MATCH (n:Person) WHERE n.age > 25 RETURN n`)
+res, _ := db.Cypher(ctx, `EXPLAIN MATCH (n:Person) WHERE n.age > 25 RETURN n`)
 fmt.Println(res.Plan.String())
 // EXPLAIN:
 // └── ProduceResults (n)
@@ -511,7 +518,7 @@ fmt.Println(res.Plan.String())
 //         └── NodeByLabelScan (n:Person)
 
 // PROFILE — executes and returns the plan annotated with actual row counts + timing
-res, _ = db.Cypher(`PROFILE MATCH (n:Person) RETURN n`)
+res, _ = db.Cypher(ctx, `PROFILE MATCH (n:Person) RETURN n`)
 fmt.Println(res.Plan.String())
 // PROFILE:
 // └── ProduceResults (n) [rows=42, time=150µs]
@@ -527,7 +534,7 @@ for _, row := range res.Rows {
 
 ```go
 // Use $param tokens to prevent injection and enable plan caching.
-res, _ := db.CypherWithParams(
+res, _ := db.CypherWithParams(ctx,
     `MATCH (n {name: $name}) WHERE n.age > $minAge RETURN n`,
     map[string]any{"name": "Alice", "minAge": 25},
 )
@@ -536,16 +543,18 @@ res, _ := db.CypherWithParams(
 #### ORDER BY, LIMIT, Prepared Queries
 
 ```go
+ctx := context.Background()
+
 // ORDER BY + LIMIT — uses a min-heap for top-K efficiency
-res, _ := db.Cypher(`MATCH (n) WHERE n.age > 20 RETURN n.name ORDER BY n.age DESC LIMIT 5`)
+res, _ := db.Cypher(ctx, `MATCH (n) WHERE n.age > 20 RETURN n.name ORDER BY n.age DESC LIMIT 5`)
 
 // LIMIT push-down — stops scanning early when no ORDER BY is present
-res, _ := db.Cypher(`MATCH (n) RETURN n LIMIT 10`)
+res, _ = db.Cypher(ctx, `MATCH (n) RETURN n LIMIT 10`)
 
 // Prepared queries — parse once, execute many times
 pq, _ := db.PrepareCypher(`MATCH (n {name: "Alice"})-[:follows]->(b) RETURN b.name`)
-res1, _ := db.ExecutePrepared(pq)
-res2, _ := db.ExecutePrepared(pq) // no re-parsing
+res1, _ := db.ExecutePrepared(ctx, pq)
+res2, _ := db.ExecutePrepared(ctx, pq) // no re-parsing
 
 // Results
 for _, row := range res.Rows {

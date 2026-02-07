@@ -11,6 +11,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -80,7 +81,7 @@ func main() {
 
 	// ── 1. EXPLAIN — Full node scan ─────────────────────────────────
 	fmt.Println("--- EXPLAIN: Full node scan ---")
-	res, err := db.Cypher(`EXPLAIN MATCH (n) RETURN n`)
+	res, err := db.Cypher(context.Background(), `EXPLAIN MATCH (n) RETURN n`)
 	if err != nil {
 		log.Printf("Error: %v", err)
 	} else {
@@ -91,7 +92,7 @@ func main() {
 
 	// ── 2. EXPLAIN — Label scan ─────────────────────────────────────
 	fmt.Println("\n--- EXPLAIN: Label scan ---")
-	res, err = db.Cypher(`EXPLAIN MATCH (p:Person) RETURN p`)
+	res, err = db.Cypher(context.Background(), `EXPLAIN MATCH (p:Person) RETURN p`)
 	if err != nil {
 		log.Printf("Error: %v", err)
 	} else {
@@ -100,7 +101,7 @@ func main() {
 
 	// ── 3. EXPLAIN — Index seek with WHERE ──────────────────────────
 	fmt.Println("\n--- EXPLAIN: Index seek via property filter ---")
-	res, err = db.Cypher(`EXPLAIN MATCH (n {name: "Alice"}) RETURN n`)
+	res, err = db.Cypher(context.Background(), `EXPLAIN MATCH (n {name: "Alice"}) RETURN n`)
 	if err != nil {
 		log.Printf("Error: %v", err)
 	} else {
@@ -109,7 +110,7 @@ func main() {
 
 	// ── 4. EXPLAIN — Label scan + WHERE filter ──────────────────────
 	fmt.Println("\n--- EXPLAIN: Label scan + WHERE filter ---")
-	res, err = db.Cypher(`EXPLAIN MATCH (p:Person) WHERE p.age > 30 RETURN p`)
+	res, err = db.Cypher(context.Background(), `EXPLAIN MATCH (p:Person) WHERE p.age > 30 RETURN p`)
 	if err != nil {
 		log.Printf("Error: %v", err)
 	} else {
@@ -118,7 +119,7 @@ func main() {
 
 	// ── 5. EXPLAIN — Single-hop expansion ───────────────────────────
 	fmt.Println("\n--- EXPLAIN: Single-hop Expand ---")
-	res, err = db.Cypher(`EXPLAIN MATCH (a:Person)-[:KNOWS]->(b) RETURN a, b`)
+	res, err = db.Cypher(context.Background(), `EXPLAIN MATCH (a:Person)-[:KNOWS]->(b) RETURN a, b`)
 	if err != nil {
 		log.Printf("Error: %v", err)
 	} else {
@@ -127,7 +128,7 @@ func main() {
 
 	// ── 6. EXPLAIN — ORDER BY + LIMIT ───────────────────────────────
 	fmt.Println("\n--- EXPLAIN: ORDER BY + LIMIT ---")
-	res, err = db.Cypher(`EXPLAIN MATCH (p:Person) RETURN p ORDER BY p.age DESC LIMIT 3`)
+	res, err = db.Cypher(context.Background(), `EXPLAIN MATCH (p:Person) RETURN p ORDER BY p.age DESC LIMIT 3`)
 	if err != nil {
 		log.Printf("Error: %v", err)
 	} else {
@@ -136,7 +137,7 @@ func main() {
 
 	// ── 7. PROFILE — Full node scan ─────────────────────────────────
 	fmt.Println("\n--- PROFILE: Full node scan ---")
-	res, err = db.Cypher(`PROFILE MATCH (n) RETURN n`)
+	res, err = db.Cypher(context.Background(), `PROFILE MATCH (n) RETURN n`)
 	if err != nil {
 		log.Printf("Error: %v", err)
 	} else {
@@ -146,7 +147,7 @@ func main() {
 
 	// ── 8. PROFILE — Label scan ─────────────────────────────────────
 	fmt.Println("\n--- PROFILE: Label scan (Person) ---")
-	res, err = db.Cypher(`PROFILE MATCH (p:Person) RETURN p`)
+	res, err = db.Cypher(context.Background(), `PROFILE MATCH (p:Person) RETURN p`)
 	if err != nil {
 		log.Printf("Error: %v", err)
 	} else {
@@ -161,7 +162,7 @@ func main() {
 
 	// ── 9. PROFILE — Single-hop ─────────────────────────────────────
 	fmt.Println("\n--- PROFILE: Single-hop KNOWS ---")
-	res, err = db.Cypher(`PROFILE MATCH (a:Person)-[:KNOWS]->(b) RETURN a, b`)
+	res, err = db.Cypher(context.Background(), `PROFILE MATCH (a:Person)-[:KNOWS]->(b) RETURN a, b`)
 	if err != nil {
 		log.Printf("Error: %v", err)
 	} else {
@@ -176,7 +177,7 @@ func main() {
 
 	// ── 10. PROFILE — Parameterized with PROFILE ────────────────────
 	fmt.Println("\n--- PROFILE: Parameterized query ---")
-	res, err = db.CypherWithParams(
+	res, err = db.CypherWithParams(context.Background(),
 		`PROFILE MATCH (n {name: $name}) RETURN n`,
 		map[string]any{"name": "Alice"},
 	)
