@@ -19,16 +19,17 @@ import (
 //   - Write operations (AddNode, AddEdge, etc.) are serialized per-shard by bbolt.
 //   - The closed flag is an atomic.Bool so reads never hold a mutex — no recursive lock issues.
 type DB struct {
-	opts         Options
-	dir          string
-	shards       []*shard
-	pool         *workerPool
-	cache        queryCache   // Cypher AST cache — avoids re-parsing identical queries
-	ncache       *nodeCache   // LRU hot-node cache — avoids repeated bbolt lookups
-	log          *slog.Logger // structured logger for all operations
-	mu           sync.Mutex   // only used in Close() to prevent double-close
-	closed       atomic.Bool  // atomic flag — checked by every operation without locking
-	indexedProps sync.Map     // map[string]bool — tracks which property names have secondary indexes
+	opts             Options
+	dir              string
+	shards           []*shard
+	pool             *workerPool
+	cache            queryCache   // Cypher AST cache — avoids re-parsing identical queries
+	ncache           *nodeCache   // LRU hot-node cache — avoids repeated bbolt lookups
+	log              *slog.Logger // structured logger for all operations
+	mu               sync.Mutex   // only used in Close() to prevent double-close
+	closed           atomic.Bool  // atomic flag — checked by every operation without locking
+	indexedProps     sync.Map     // map[string]bool — tracks which property names have secondary indexes
+	compositeIndexes sync.Map     // map[string]compositeIndexDef — tracks composite indexes
 }
 
 // Open creates or opens a graph database at the given directory path.
@@ -40,8 +41,8 @@ func Open(dir string, opts Options) (*DB, error) {
 	if opts.WorkerPoolSize <= 0 {
 		opts.WorkerPoolSize = 8
 	}
-	if opts.CacheSize <= 0 {
-		opts.CacheSize = 100_000
+	if opts.CacheBudget <= 0 {
+		opts.CacheBudget = 128 * 1024 * 1024 // 128MB
 	}
 
 	logger := opts.Logger
@@ -53,7 +54,8 @@ func Open(dir string, opts Options) (*DB, error) {
 		opts:   opts,
 		dir:    dir,
 		shards: make([]*shard, opts.ShardCount),
-		ncache: newNodeCache(opts.CacheSize),
+		cache:  newQueryCache(defaultQueryCacheCapacity),
+		ncache: newNodeCache(opts.CacheBudget),
 		log:    logger,
 	}
 
@@ -76,12 +78,13 @@ func Open(dir string, opts Options) (*DB, error) {
 
 	// Discover existing property indexes from disk (survives restart).
 	db.discoverIndexes()
+	db.discoverCompositeIndexes()
 
 	db.log.Info("database opened",
 		"dir", dir,
 		"shards", opts.ShardCount,
 		"workers", opts.WorkerPoolSize,
-		"node_cache_capacity", opts.CacheSize,
+		"cache_budget_bytes", opts.CacheBudget,
 	)
 
 	return db, nil

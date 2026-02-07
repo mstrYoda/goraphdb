@@ -2,6 +2,8 @@
 package server
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -9,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	graphdb "github.com/mstrYoda/goraphdb"
@@ -24,11 +27,19 @@ type Server struct {
 	db    *graphdb.DB
 	mux   *http.ServeMux
 	uiDir string // path to ui/dist (empty = API-only mode)
+
+	// Prepared statement pool: stmtID → *graphdb.PreparedQuery
+	stmts   map[string]*graphdb.PreparedQuery
+	stmtsMu sync.RWMutex
 }
 
 // New creates a ready-to-use Server.
 func New(db *graphdb.DB, uiDir string) *Server {
-	s := &Server{db: db, uiDir: uiDir}
+	s := &Server{
+		db:    db,
+		uiDir: uiDir,
+		stmts: make(map[string]*graphdb.PreparedQuery),
+	}
 	s.mux = http.NewServeMux()
 	s.routes()
 	return s
@@ -61,6 +72,10 @@ func (s *Server) routes() {
 
 	// Cypher
 	s.mux.HandleFunc("POST /api/cypher", s.handleCypher)
+	s.mux.HandleFunc("POST /api/cypher/stream", s.handleCypherStream)
+	s.mux.HandleFunc("POST /api/cypher/prepare", s.handleCypherPrepare)
+	s.mux.HandleFunc("POST /api/cypher/execute", s.handleCypherExecute)
+	s.mux.HandleFunc("GET /api/cache/stats", s.handleCacheStats)
 
 	// Nodes
 	s.mux.HandleFunc("GET /api/nodes", s.handleListNodes)
@@ -323,6 +338,164 @@ func nodeLabel(props map[string]any) string {
 		}
 	}
 	return ""
+}
+
+// ---------------------------------------------------------------------------
+// Streaming Cypher (NDJSON)
+// ---------------------------------------------------------------------------
+
+func (s *Server) handleCypherStream(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Query  string         `json:"query"`
+		Params map[string]any `json:"params"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "invalid JSON body")
+		return
+	}
+	if strings.TrimSpace(req.Query) == "" {
+		writeError(w, 400, "query is required")
+		return
+	}
+
+	var iter graphdb.RowIterator
+	var err error
+	if len(req.Params) > 0 {
+		iter, err = s.db.CypherStreamWithParams(req.Query, req.Params)
+	} else {
+		iter, err = s.db.CypherStream(req.Query)
+	}
+	if err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	defer iter.Close()
+
+	// Stream as newline-delimited JSON (NDJSON).
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("X-Columns", strings.Join(iter.Columns(), ","))
+	w.WriteHeader(200)
+
+	flusher, canFlush := w.(http.Flusher)
+	enc := json.NewEncoder(w)
+
+	for iter.Next() {
+		if encErr := enc.Encode(iter.Row()); encErr != nil {
+			return // client disconnected
+		}
+		if canFlush {
+			flusher.Flush()
+		}
+	}
+	if iterErr := iter.Err(); iterErr != nil {
+		// Best effort: write error as final NDJSON line.
+		_ = enc.Encode(map[string]string{"error": iterErr.Error()})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Prepared Statements
+// ---------------------------------------------------------------------------
+
+func (s *Server) handleCypherPrepare(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Query string `json:"query"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "invalid JSON body")
+		return
+	}
+	if strings.TrimSpace(req.Query) == "" {
+		writeError(w, 400, "query is required")
+		return
+	}
+
+	pq, err := s.db.PrepareCypher(req.Query)
+	if err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+
+	// Generate a deterministic statement ID from the query hash.
+	h := sha256.Sum256([]byte(req.Query))
+	stmtID := hex.EncodeToString(h[:8]) // 16-char hex
+
+	s.stmtsMu.Lock()
+	s.stmts[stmtID] = pq
+	s.stmtsMu.Unlock()
+
+	writeJSON(w, 200, map[string]string{
+		"stmt_id": stmtID,
+		"query":   req.Query,
+		"status":  "prepared",
+	})
+}
+
+func (s *Server) handleCypherExecute(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		StmtID string         `json:"stmt_id"`
+		Params map[string]any `json:"params"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "invalid JSON body")
+		return
+	}
+	if req.StmtID == "" {
+		writeError(w, 400, "stmt_id is required")
+		return
+	}
+
+	s.stmtsMu.RLock()
+	pq, ok := s.stmts[req.StmtID]
+	s.stmtsMu.RUnlock()
+
+	if !ok {
+		writeError(w, 404, "statement not found — call /api/cypher/prepare first")
+		return
+	}
+
+	start := time.Now()
+	var result *graphdb.CypherResult
+	var err error
+	if len(req.Params) > 0 {
+		result, err = s.db.ExecutePreparedWithParams(pq, req.Params)
+	} else {
+		result, err = s.db.ExecutePrepared(pq)
+	}
+	elapsed := time.Since(start)
+
+	if err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+
+	rows := result.Rows
+	if rows == nil {
+		rows = []map[string]any{}
+	}
+
+	graph := s.extractGraphData(result)
+
+	writeJSON(w, 200, cypherResponse{
+		Columns:    result.Columns,
+		Rows:       rows,
+		Graph:      graph,
+		RowCount:   len(rows),
+		ExecTimeMs: float64(elapsed.Microseconds()) / 1000.0,
+	})
+}
+
+func (s *Server) handleCacheStats(w http.ResponseWriter, _ *http.Request) {
+	cacheStats := s.db.QueryCacheStats()
+
+	s.stmtsMu.RLock()
+	stmtCount := len(s.stmts)
+	s.stmtsMu.RUnlock()
+
+	writeJSON(w, 200, map[string]any{
+		"query_cache":         cacheStats,
+		"prepared_statements": stmtCount,
+	})
 }
 
 // ---------------------------------------------------------------------------
