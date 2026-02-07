@@ -14,15 +14,21 @@ A high-performance, embeddable graph database written in Go. Built on top of [bb
 - **Graph algorithms** — BFS, DFS, Shortest Path (unweighted & Dijkstra), All Paths, Connected Components, Topological Sort
 - **Fluent query builder** — chainable Go API with filtering, pagination, and direction control
 - **Secondary indexes** — O(log N) property lookups with auto-maintenance on single writes
+- **Composite indexes** — multi-property indexes for fast compound lookups (`CreateCompositeIndex("city", "age")`)
 - **Cypher query language** — read-only subset with index-aware execution, LIMIT push-down, ORDER BY + LIMIT heap, query plan caching, `OPTIONAL MATCH`, `EXPLAIN`/`PROFILE`, and parameterized queries
 - **Transactions** — `Begin`/`Commit`/`Rollback` API for multi-statement atomic operations with read-your-writes semantics
 - **EXPLAIN / PROFILE** — query plan tree with operator types; `PROFILE` adds per-operator row counts and wall-clock timing
 - **OPTIONAL MATCH** — left-outer-join semantics for graph patterns (unmatched bindings become `nil`)
-- **Node hot cache** — sharded concurrent LRU cache for frequently accessed nodes, reducing bbolt lookups and MessagePack decoding
+- **Byte-budgeted node cache** — sharded concurrent LRU cache with memory-based eviction (default 128 MB); predictable memory footprint regardless of node sizes
 - **Data integrity** — CRC32 (Castagnoli) checksums on all node/edge data, verified on every read, with a `VerifyIntegrity()` full scan
 - **Binary encoding** — MessagePack property serialization (3–5× faster, 30–50% smaller than JSON) with backward-compatible format detection
 - **Structured logging** — `log/slog` integration for all write operations, errors, and lifecycle events
 - **Parameterized queries** — `$param` tokens in Cypher for safe substitution and plan reuse
+- **Prepared statement caching** — bounded LRU query cache (10K entries) with `PrepareCypher`/`ExecutePrepared`/`ExecutePreparedWithParams` API and server-side `/api/cypher/prepare` + `/api/cypher/execute` endpoints
+- **Streaming results** — `CypherStream()` returns a lazy `RowIterator` for O(1) memory on non-sorted queries; NDJSON streaming via `POST /api/cypher/stream`
+- **Slow query log** — configurable threshold (default 100ms); queries exceeding the threshold are logged at WARN level with duration, row count, and truncated query text
+- **Cursor pagination** — O(limit) cursor-based `ListNodes`/`ListEdges`/`ListNodesByLabel` APIs; no offset scanning. Server endpoints: `GET /api/nodes/cursor`, `GET /api/edges/cursor`
+- **Prometheus metrics** — dependency-free atomic counters with Prometheus text exposition at `GET /metrics`; tracks queries, slow queries, cache hits/misses, node/edge CRUD, index lookups, and live gauges
 - **Batch operations** — `AddNodeBatch` / `AddEdgeBatch` for bulk loading with single-fsync transactions
 - **Worker pool** — built-in goroutine pool for concurrent query execution
 - **Optional sharding** — hash-based partitioning across multiple bbolt files; edges co-located with source nodes for single-shard traversals
@@ -85,12 +91,13 @@ func main() {
 
 ```go
 opts := graphdb.Options{
-    ShardCount:     1,              // 1 = single process (default), N = hash-sharded
-    WorkerPoolSize: 8,              // goroutines for concurrent query execution
-    CacheSize:      100_000,        // LRU cache capacity (node count)
-    NoSync:         false,          // true = skip fsync (faster writes, risk of data loss)
-    ReadOnly:       false,          // open in read-only mode
-    MmapSize:       256 * 1024 * 1024, // 256 MB initial mmap
+    ShardCount:         1,                      // 1 = single process (default), N = hash-sharded
+    WorkerPoolSize:     8,                      // goroutines for concurrent query execution
+    CacheBudget:        128 * 1024 * 1024,      // 128 MB byte-budget LRU cache for hot nodes
+    SlowQueryThreshold: 100 * time.Millisecond, // log queries slower than this (0 = disabled)
+    NoSync:             false,                  // true = skip fsync (faster writes, risk of data loss)
+    ReadOnly:           false,                  // open in read-only mode
+    MmapSize:           256 * 1024 * 1024,      // 256 MB initial mmap
 }
 db, err := graphdb.Open("./data", opts)
 ```
@@ -254,6 +261,120 @@ err = db.ReIndex("name")
 ```
 
 > **Index maintenance**: `AddNode`, `UpdateNode`, `SetNodeProps`, and `DeleteNode` automatically update indexes within the same transaction (zero extra fsync). `AddNodeBatch` skips auto-indexing for performance — call `CreateIndex()` or `ReIndex()` after batch inserts.
+
+### Composite Indexes
+
+```go
+// Create a composite index on multiple properties (scans existing nodes)
+err = db.CreateCompositeIndex("city", "age")
+
+// Fast compound lookup — O(log N) via B+tree prefix scan
+nodes, err := db.FindByCompositeIndex(map[string]any{"city": "Istanbul", "age": 30})
+
+// Cypher queries use composite indexes automatically
+// MATCH (n {city: "Istanbul", age: 30}) RETURN n  → composite index seek
+
+// Management
+has := db.HasCompositeIndex("city", "age")
+indexes := db.ListCompositeIndexes() // [][]string
+err = db.DropCompositeIndex("city", "age")
+```
+
+### Prepared Statements & Query Cache
+
+```go
+// Prepare a parameterized query (parsed once, cached)
+pq, err := db.PrepareCypher("MATCH (n {name: $name}) RETURN n")
+
+// Execute with different parameters — no re-parsing
+result, err := db.ExecutePreparedWithParams(pq, map[string]any{"name": "Alice"})
+result, err := db.ExecutePreparedWithParams(pq, map[string]any{"name": "Bob"})
+
+// Execute without parameters
+result, err := db.ExecutePrepared(pq)
+
+// Query cache statistics (bounded LRU, default 10K entries)
+stats := db.QueryCacheStats()
+fmt.Printf("hits=%d misses=%d entries=%d\n", stats.Hits, stats.Misses, stats.Entries)
+```
+
+### Streaming Results (Iterator)
+
+```go
+// CypherStream returns a lazy RowIterator — O(1) memory for non-sorted queries.
+iter, err := db.CypherStream("MATCH (n) RETURN n.name LIMIT 100")
+if err != nil {
+    log.Fatal(err)
+}
+defer iter.Close()
+
+for iter.Next() {
+    row := iter.Row()
+    fmt.Println(row["n.name"])
+}
+if err := iter.Err(); err != nil {
+    log.Fatal(err)
+}
+
+// Parameterized streaming
+iter, err = db.CypherStreamWithParams(
+    "MATCH (n {city: $city}) RETURN n.name",
+    map[string]any{"city": "Istanbul"},
+)
+```
+
+### Cursor Pagination
+
+```go
+// List nodes with cursor-based pagination — O(limit) per page, no offset scan.
+page, err := db.ListNodes(0, 20) // first page, 20 nodes
+for _, n := range page.Nodes {
+    fmt.Printf("id=%d name=%s\n", n.ID, n.GetString("name"))
+}
+
+// Next page: pass the cursor from the previous page.
+if page.HasMore {
+    page2, _ := db.ListNodes(page.NextCursor, 20)
+    // ...
+}
+
+// Edges and label-filtered nodes also supported.
+edgePage, _ := db.ListEdges(0, 50)
+labelPage, _ := db.ListNodesByLabel("Person", 0, 20)
+```
+
+### Slow Query Log
+
+```go
+// Queries exceeding SlowQueryThreshold are logged at WARN level automatically.
+opts := graphdb.DefaultOptions()
+opts.SlowQueryThreshold = 50 * time.Millisecond // default: 100ms, 0 = disabled
+
+// Log output (slog):
+// WARN slow query detected query="MATCH (n) RETURN n" duration=152ms rows=50000
+```
+
+### Prometheus Metrics
+
+```go
+// All metrics are atomic counters — zero contention, no external dependencies.
+m := db.Metrics()
+
+// Programmatic access
+snap := m.Snapshot() // map[string]any with all counters + live gauges
+
+// Prometheus text exposition (for /metrics endpoint or manual use)
+m.WritePrometheus(os.Stdout)
+// Output:
+// # HELP graphdb_queries_total Total number of Cypher query executions
+// # TYPE graphdb_queries_total counter
+// graphdb_queries_total 42
+// ...
+```
+
+Available metrics:
+- **Counters**: `graphdb_queries_total`, `graphdb_slow_queries_total`, `graphdb_query_errors_total`, `graphdb_cache_hits_total`, `graphdb_cache_misses_total`, `graphdb_nodes_created_total`, `graphdb_nodes_deleted_total`, `graphdb_edges_created_total`, `graphdb_edges_deleted_total`, `graphdb_index_lookups_total`
+- **Gauges**: `graphdb_nodes_current`, `graphdb_edges_current`, `graphdb_node_cache_bytes_used`, `graphdb_node_cache_budget_bytes`, `graphdb_query_cache_entries`, `graphdb_query_cache_capacity`
 
 ### Fluent Query Builder
 
@@ -540,6 +661,27 @@ curl -X POST http://localhost:7474/api/nodes \
 # Create an edge
 curl -X POST http://localhost:7474/api/edges \
   -d '{"from": 1, "to": 2, "label": "follows"}'
+
+# Cursor pagination (O(limit) per page)
+curl 'http://localhost:7474/api/nodes/cursor?limit=20'
+curl 'http://localhost:7474/api/nodes/cursor?cursor=42&limit=20'
+curl 'http://localhost:7474/api/edges/cursor?limit=50'
+
+# Prepare and execute a statement
+curl -X POST http://localhost:7474/api/cypher/prepare \
+  -d '{"query": "MATCH (n {name: $name}) RETURN n"}'
+curl -X POST http://localhost:7474/api/cypher/execute \
+  -d '{"stmt_id": "abc123", "params": {"name": "Alice"}}'
+
+# NDJSON streaming
+curl -X POST http://localhost:7474/api/cypher/stream \
+  -d '{"query": "MATCH (n) RETURN n.name LIMIT 100"}'
+
+# Prometheus metrics
+curl http://localhost:7474/metrics
+
+# Query cache stats
+curl http://localhost:7474/api/cache/stats
 ```
 
 ### Tech Stack
