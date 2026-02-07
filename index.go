@@ -202,7 +202,12 @@ func (db *DB) indexNodeProps(tx *bolt.Tx, nodeID NodeID, props Props) error {
 		}
 		return true
 	})
-	return firstErr
+	if firstErr != nil {
+		return firstErr
+	}
+
+	// Maintain composite indexes.
+	return db.indexNodeComposite(tx, nodeID, props)
 }
 
 // unindexNodeProps removes index entries for all indexed properties of a node.
@@ -228,5 +233,10 @@ func (db *DB) unindexNodeProps(tx *bolt.Tx, nodeID NodeID, props Props) error {
 		}
 		return true
 	})
-	return firstErr
+	if firstErr != nil {
+		return firstErr
+	}
+
+	// Maintain composite indexes.
+	return db.unindexNodeComposite(tx, nodeID, props)
 }

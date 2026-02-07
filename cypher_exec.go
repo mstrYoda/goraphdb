@@ -290,7 +290,43 @@ func (db *DB) execNodeMatch(q *CypherQuery) (*CypherResult, error) {
 	}
 
 	// ------------------------------------------------------------------
-	// Optimization 1: Index-accelerated inline property lookup.
+	// Optimization 1a: Composite index lookup for multi-property patterns.
+	//   MATCH (n {city: "Istanbul", age: 30}) → use composite index if available.
+	// ------------------------------------------------------------------
+	if len(nodePat.Props) >= 2 {
+		propNames := make([]string, 0, len(nodePat.Props))
+		for k := range nodePat.Props {
+			propNames = append(propNames, k)
+		}
+		if db.HasCompositeIndex(propNames...) {
+			filters := make(map[string]any, len(nodePat.Props))
+			for k, v := range nodePat.Props {
+				filters[k] = v
+			}
+			candidates, err := db.FindByCompositeIndex(filters)
+			if err != nil {
+				return nil, err
+			}
+			var nodes []*Node
+			for _, n := range candidates {
+				if q.Where != nil {
+					bindings := map[string]any{varName: n}
+					ok, err := evalBool(q.Where, bindings)
+					if err != nil {
+						return nil, err
+					}
+					if !ok {
+						continue
+					}
+				}
+				nodes = append(nodes, n)
+			}
+			return db.projectResults(q, nodes, nil, varName, "")
+		}
+	}
+
+	// ------------------------------------------------------------------
+	// Optimization 1b: Index-accelerated inline property lookup.
 	//   MATCH (n {name: "Alice"}) → use FindByProperty if "name" is indexed.
 	// ------------------------------------------------------------------
 	if len(nodePat.Props) > 0 {
