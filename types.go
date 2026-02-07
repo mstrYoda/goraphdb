@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"time"
 )
 
 // NodeID uniquely identifies a node in the graph.
@@ -123,6 +124,10 @@ type Options struct {
 	// MmapSize is the initial mmap size for the database file in bytes.
 	// Larger values improve performance for large datasets. Default: 256MB.
 	MmapSize int
+	// SlowQueryThreshold is the duration threshold for slow query logging.
+	// Queries exceeding this duration are logged at WARN level.
+	// Default: 100ms. Set to 0 to disable slow query logging.
+	SlowQueryThreshold time.Duration
 	// Logger is the structured logger for all database operations.
 	// If nil, slog.Default() is used.
 	Logger *slog.Logger
@@ -131,12 +136,13 @@ type Options struct {
 // DefaultOptions returns sensible defaults for a ~50GB graph database.
 func DefaultOptions() Options {
 	return Options{
-		ShardCount:     1,
-		WorkerPoolSize: 8,
-		CacheBudget:    128 * 1024 * 1024, // 128MB
-		NoSync:         false,
-		ReadOnly:       false,
-		MmapSize:       256 * 1024 * 1024, // 256MB initial mmap
+		ShardCount:         1,
+		WorkerPoolSize:     8,
+		CacheBudget:        128 * 1024 * 1024, // 128MB
+		SlowQueryThreshold: 100 * time.Millisecond,
+		NoSync:             false,
+		ReadOnly:           false,
+		MmapSize:           256 * 1024 * 1024, // 256MB initial mmap
 	}
 }
 
