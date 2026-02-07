@@ -79,6 +79,7 @@ func (s *Server) routes() {
 
 	// Nodes
 	s.mux.HandleFunc("GET /api/nodes", s.handleListNodes)
+	s.mux.HandleFunc("GET /api/nodes/cursor", s.handleListNodesCursor)
 	s.mux.HandleFunc("GET /api/nodes/{id}", s.handleGetNode)
 	s.mux.HandleFunc("GET /api/nodes/{id}/neighborhood", s.handleNodeNeighborhood)
 	s.mux.HandleFunc("POST /api/nodes", s.handleCreateNode)
@@ -86,7 +87,11 @@ func (s *Server) routes() {
 
 	// Edges
 	s.mux.HandleFunc("POST /api/edges", s.handleCreateEdge)
+	s.mux.HandleFunc("GET /api/edges/cursor", s.handleListEdgesCursor)
 	s.mux.HandleFunc("DELETE /api/edges/{id}", s.handleDeleteEdge)
+
+	// Metrics
+	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
 
 	// SPA fallback — must be last.
 	if s.uiDir != "" {
@@ -675,8 +680,98 @@ func (s *Server) handleDeleteEdge(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------------------------
+// Cursor Pagination
+// ---------------------------------------------------------------------------
+
+func (s *Server) handleListNodesCursor(w http.ResponseWriter, r *http.Request) {
+	cursor := uint64Query(r, "cursor", 0)
+	limit := intQuery(r, "limit", 50)
+
+	page, err := s.db.ListNodes(graphdb.NodeID(cursor), limit)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+
+	type nodeJSON struct {
+		ID     uint64         `json:"id"`
+		Labels []string       `json:"labels,omitempty"`
+		Props  map[string]any `json:"props"`
+	}
+
+	nodes := make([]nodeJSON, len(page.Nodes))
+	for i, n := range page.Nodes {
+		nodes[i] = nodeJSON{ID: uint64(n.ID), Labels: n.Labels, Props: n.Props}
+	}
+
+	writeJSON(w, 200, map[string]any{
+		"nodes":       nodes,
+		"next_cursor": page.NextCursor,
+		"has_more":    page.HasMore,
+		"limit":       limit,
+	})
+}
+
+func (s *Server) handleListEdgesCursor(w http.ResponseWriter, r *http.Request) {
+	cursor := uint64Query(r, "cursor", 0)
+	limit := intQuery(r, "limit", 50)
+
+	page, err := s.db.ListEdges(graphdb.EdgeID(cursor), limit)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+
+	type edgeJSON struct {
+		ID    uint64         `json:"id"`
+		From  uint64         `json:"from"`
+		To    uint64         `json:"to"`
+		Label string         `json:"label"`
+		Props map[string]any `json:"props,omitempty"`
+	}
+
+	edges := make([]edgeJSON, len(page.Edges))
+	for i, e := range page.Edges {
+		edges[i] = edgeJSON{ID: uint64(e.ID), From: uint64(e.From), To: uint64(e.To), Label: e.Label, Props: e.Props}
+	}
+
+	writeJSON(w, 200, map[string]any{
+		"edges":       edges,
+		"next_cursor": page.NextCursor,
+		"has_more":    page.HasMore,
+		"limit":       limit,
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Prometheus Metrics
+// ---------------------------------------------------------------------------
+
+func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
+	m := s.db.Metrics()
+	if m == nil {
+		writeError(w, 500, "metrics not initialized")
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	m.WritePrometheus(w)
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+func uint64Query(r *http.Request, key string, fallback uint64) uint64 {
+	v := r.URL.Query().Get(key)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.ParseUint(v, 10, 64)
+	if err != nil {
+		return fallback
+	}
+	return n
+}
 
 func intQuery(r *http.Request, key string, fallback int) int {
 	v := r.URL.Query().Get(key)
