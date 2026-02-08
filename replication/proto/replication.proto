@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package replication;
+
+option go_package = "github.com/mstrYoda/goraphdb/replication/proto";
+
+// ReplicationService streams committed WAL entries from leader to followers.
+// Followers call StreamWAL with their last applied LSN; the leader responds
+// with a continuous stream of entries starting from that point.
+service ReplicationService {
+  // StreamWAL is a server-streaming RPC. The follower sends its last applied
+  // LSN, and the leader streams all subsequent WAL entries in real-time.
+  // The stream stays open — new entries are pushed as they are committed.
+  rpc StreamWAL(StreamWALRequest) returns (stream WALEntryProto);
+}
+
+// StreamWALRequest is sent by the follower to initiate replication.
+message StreamWALRequest {
+  // from_lsn is the first LSN the follower wants. Typically appliedLSN + 1.
+  uint64 from_lsn = 1;
+  // follower_id is an opaque identifier for logging/diagnostics.
+  string follower_id = 2;
+}
+
+// WALEntryProto is a single WAL entry shipped over the wire.
+// The payload is the raw msgpack-encoded operation data — the follower
+// deserialises it using the same WALEntry codec as the leader.
+message WALEntryProto {
+  uint64 lsn = 1;
+  int64  timestamp_ns = 2;
+  uint32 op = 3;         // OpType enum value
+  bytes  payload = 4;    // msgpack-encoded operation payload
+}

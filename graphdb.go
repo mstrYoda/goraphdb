@@ -246,6 +246,12 @@ func (db *DB) walAppend(op OpType, payloadStruct any) {
 	}
 }
 
+// WAL returns the write-ahead log, or nil if WAL is not enabled.
+// Used by the replication package to create readers for log shipping.
+func (db *DB) WAL() *WAL {
+	return db.wal
+}
+
 // Metrics returns the operational metrics collector.
 // Use this to read counters or write Prometheus exposition format.
 func (db *DB) Metrics() *Metrics {

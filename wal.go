@@ -271,14 +271,24 @@ func (w *WAL) NewReader(fromLSN uint64) (*WALReader, error) {
 	}, nil
 }
 
-// Next reads the next WAL entry. Returns io.EOF when no more entries.
-// Entries with LSN < fromLSN are silently skipped.
+// Next reads the next WAL entry. Returns io.EOF when no more entries are
+// currently available. The reader supports tailing: after receiving io.EOF,
+// callers can call Next() again later — new entries appended to the active
+// segment (or to new segments after rotation) will be returned.
 func (r *WALReader) Next() (*WALEntry, error) {
 	for {
 		// Open the next segment file if needed.
 		if r.file == nil {
 			if r.segIdx >= len(r.segments) {
-				return nil, io.EOF
+				// Refresh segment list — the writer may have rotated.
+				segs, err := r.wal.listSegments()
+				if err != nil {
+					return nil, err
+				}
+				r.segments = segs
+				if r.segIdx >= len(r.segments) {
+					return nil, io.EOF
+				}
 			}
 			path := r.wal.segmentPath(r.segments[r.segIdx])
 			f, err := os.Open(path)
@@ -292,11 +302,19 @@ func (r *WALReader) Next() (*WALEntry, error) {
 		var frameLenBuf [4]byte
 		if _, err := io.ReadFull(r.file, frameLenBuf[:]); err != nil {
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
-				// End of this segment — move to the next.
-				r.file.Close()
-				r.file = nil
-				r.segIdx++
-				continue
+				// Check if there are newer segments available.
+				segs, _ := r.wal.listSegments()
+				if len(segs) > len(r.segments) {
+					// New segment exists — this one is complete.
+					r.file.Close()
+					r.file = nil
+					r.segments = segs
+					r.segIdx++
+					continue
+				}
+				// No newer segment — we're at the tail of the active segment.
+				// Return EOF but keep file open for tailing.
+				return nil, io.EOF
 			}
 			return nil, err
 		}
@@ -307,10 +325,16 @@ func (r *WALReader) Next() (*WALEntry, error) {
 		if _, err := io.ReadFull(r.file, buf); err != nil {
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
 				// Partial entry at end of segment (crash during write).
-				r.file.Close()
-				r.file = nil
-				r.segIdx++
-				continue
+				// Check for newer segments.
+				segs, _ := r.wal.listSegments()
+				if len(segs) > len(r.segments) {
+					r.file.Close()
+					r.file = nil
+					r.segments = segs
+					r.segIdx++
+					continue
+				}
+				return nil, io.EOF
 			}
 			return nil, err
 		}
