@@ -587,6 +587,94 @@ if report.OK() {
 }
 ```
 
+## Replication
+
+GraphDB supports **single-leader replication** with automatic failover. One node accepts all writes (the leader), while multiple read replicas (followers) serve read queries for horizontal read scaling.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      Replication Cluster                        │
+│                                                                 │
+│  ┌──────────────┐   gRPC StreamWAL   ┌──────────────┐          │
+│  │    Leader     │ ────────────────► │  Follower 1   │          │
+│  │              │                    │              │          │
+│  │  Writes ──► WAL ──────────────► │  Applier ──► DB│          │
+│  │              │                    └──────────────┘          │
+│  │              │   gRPC StreamWAL   ┌──────────────┐          │
+│  │              │ ────────────────► │  Follower 2   │          │
+│  │              │                    │              │          │
+│  │              │                    │  Applier ──► DB│          │
+│  └──────┬───────┘                    └──────────────┘          │
+│         │                                                       │
+│         │ Raft (leader election only)                           │
+│         └──────── heartbeats ──────── all nodes                 │
+│                                                                 │
+│  Query Router:                                                  │
+│    MATCH  → any node (local)                                    │
+│    CREATE → leader (forwarded via HTTP if received by follower) │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Components
+
+| Component | File(s) | Purpose |
+|---|---|---|
+| **WAL** | `wal.go`, `wal_entry.go` | Append-only log of all committed mutations. Segmented (64 MB), CRC32 checksums, msgpack encoding. Monotonic LSN for ordering. |
+| **Applier** | `applier.go` | Replays WAL entries on followers. Deterministic (uses leader's IDs), idempotent (skips duplicate LSNs), sequential. |
+| **Log Shipping** | `replication/server.go`, `replication/client.go` | gRPC server-streaming RPC. Leader streams WAL entries; follower applies them via the Applier. Auto-reconnect with exponential backoff. |
+| **Leader Election** | `replication/election.go` | hashicorp/raft integration for automatic leader election and failover. Raft is used only for election — data flows through the WAL pipeline. |
+| **Query Router** | `replication/router.go` | Routes reads locally, forwards writes to the leader via HTTP. Integrates with election for dynamic leader discovery. |
+| **Write Handler** | `replication/write_handler.go` | HTTP endpoint on the leader that accepts forwarded write operations from follower routers. |
+
+### Configuration
+
+```go
+// Leader node
+leader, _ := graphdb.Open("./data", graphdb.Options{
+    ShardCount: 4,
+    EnableWAL:  true,
+    Role:       "leader",
+})
+
+// Follower node
+follower, _ := graphdb.Open("./data-replica", graphdb.Options{
+    ShardCount: 4,
+    Role:       "follower",  // rejects all direct writes
+})
+```
+
+### Roles
+
+- **`""` or `"standalone"`** — default, no replication. WAL is optional.
+- **`"leader"`** — accepts writes, records to WAL, ships entries to followers.
+- **`"follower"`** — read-only. All public write methods return `ErrReadOnlyReplica`. Only the internal Applier can write.
+
+Roles can be changed at runtime via `db.SetRole("leader")` — used by the Raft election callback when leadership changes.
+
+### WAL Format
+
+```
+┌──────────┬──────────────────┬──────────┐
+│ 4B length│ msgpack WALEntry  │ 4B CRC32 │  ← one frame
+└──────────┴──────────────────┴──────────┘
+```
+
+- **Segment files**: `wal-0000000000.log`, `wal-0000000001.log`, …
+- **Rotation**: new segment at 64 MB
+- **16 operation types**: AddNode, AddNodeBatch, UpdateNode, SetNodeProps, DeleteNode, AddEdge, AddEdgeBatch, DeleteEdge, UpdateEdge, AddNodeWithLabels, AddLabel, RemoveLabel, CreateIndex, DropIndex, CreateCompositeIndex, DropCompositeIndex
+- **Tailing**: WALReader supports live tailing — returns `io.EOF` at the end of the active segment, resumes on next call when new data is appended
+
+### Write Forwarding
+
+When a follower's Router receives a write request:
+1. The local DB rejects it with `ErrReadOnlyReplica`
+2. The Router serializes the operation as JSON
+3. The operation is forwarded to the leader's `/api/write` HTTP endpoint
+4. The leader executes it locally and returns the result
+5. The mutation flows back to followers via the WAL → gRPC pipeline
+
 ## Architecture
 
 ```
@@ -597,7 +685,11 @@ if report.OK() {
 ├──────────────────────────────────────────────────────────────┤
 │                    HTTP / JSON API                            │
 │   /api/cypher · /api/nodes · /api/edges · /api/indexes       │
-│   /api/stats · CORS · SPA fallback                           │
+│   /api/stats · /api/write (forwarded writes) · CORS          │
+├──────────────────────────────────────────────────────────────┤
+│                     Replication Layer                         │
+│   WAL · gRPC Log Shipping · Applier · Raft Election          │
+│   Query Router · Write Forwarding · Role Management          │
 ├──────────────────────────────────────────────────────────────┤
 │                        Public API                            │
 │   Node/Edge CRUD · Labels · Transactions (Begin/Commit)      │
@@ -812,18 +904,21 @@ go test -bench=. -benchmem # benchmarks
 
 ### Phase 1 — Foundation
 - [ ] **Hot Backup / Restore** — consistent snapshot using bbolt's built-in `WriteTo`, zero downtime
-- [ ] **Write-Ahead Log (WAL)** — log every mutation to a sequential file before applying to bbolt; enables replication and point-in-time recovery
-- [ ] **Write Cypher** — `CREATE`, `SET`, `DELETE`, `MERGE` support in the Cypher engine
-- [ ] **Prometheus Metrics** — `graphdb_nodes_total`, `graphdb_query_duration_seconds`, `graphdb_write_ops_total`, etc.
+- [x] **Write-Ahead Log (WAL)** — append-only segmented log (64 MB segments, CRC32, msgpack) with WALReader tailing support
+- [x] **Write Cypher** — `CREATE` support in the Cypher engine
+- [x] **Prometheus Metrics** — atomic counters with Prometheus text exposition
 
 ### Phase 2 — Replication & Reliability
-- [ ] **Raft-based Replication** — each shard group runs a Raft consensus group (`hashicorp/raft`) with 1 leader + N followers for automatic failover
+- [x] **Single-Leader Replication** — WAL → gRPC log shipping → follower Applier pipeline with 16 operation types
+- [x] **Leader Election** — hashicorp/raft integration for automatic failover with dynamic role switching
+- [x] **Query Router** — read/write routing with HTTP write forwarding from followers to leader
+- [x] **Read-Only Replicas** — `writeGuard` on all 16 public write methods, `ErrReadOnlyReplica` sentinel
 - [ ] **Point-in-Time Recovery** — replay WAL from a backup snapshot to restore data to any past timestamp
 - [ ] **Change Data Capture (CDC)** — streaming API for external consumers to subscribe to graph mutations in real time
 - [ ] **Authentication & TLS** — user/password auth and encrypted connections for network-exposed deployments
 
 ### Phase 3 — Distributed Cluster
-- [ ] **gRPC Inter-Node Protocol** — `ForwardQuery`, `ForwardWrite`, `TransferShard`, `Heartbeat` RPCs between cluster nodes
+- [x] **gRPC Inter-Node Protocol** — `StreamWAL` server-streaming RPC for replication with auto-reconnect
 - [ ] **Cluster Membership** — node discovery and health checking via gossip protocol (`hashicorp/memberlist`)
 - [ ] **Shard Placement Manager** — catalog of shard→node assignments, stored in its own Raft group
 - [ ] **Distributed Query Coordinator** — route Cypher queries to the correct node(s), scatter-gather for cross-shard queries, merge results
@@ -834,10 +929,9 @@ go test -bench=. -benchmem # benchmarks
 ### Phase 4 — Production Hardening
 - [ ] **Range Indexes** — B+tree range scans for numerical/date properties (`WHERE n.age > 25` without full scan)
 - [ ] **Graph Partitioning** — smarter shard placement (METIS/Fennel) to minimize cross-shard edges
-- [ ] **Read Replicas** — route read-only Cypher to Raft followers, writes to leader
 - [ ] **Bloom Filters** — fast `HasEdge()` checks without touching disk
 - [ ] **Schema Constraints** — unique properties, required fields, edge cardinality rules
-- [ ] **Query Timeout & Cancellation** — context-based cancellation for long-running queries
+- [x] **Query Timeout & Cancellation** — context-based cancellation for long-running queries
 - [ ] **Connection Pooling & Rate Limiting** — protect against runaway queries in multi-tenant setups
 
 ## License
