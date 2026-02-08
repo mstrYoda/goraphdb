@@ -214,7 +214,10 @@ func (db *DB) Close() error {
 var ErrReadOnlyReplica = fmt.Errorf("graphdb: this is a read-only replica")
 
 // isFollower returns true if this DB instance is configured as a follower.
+// Thread-safe — reads are protected by db.mu since SetRole can change the role.
 func (db *DB) isFollower() bool {
+	db.mu.Lock()
+	defer db.mu.Unlock()
 	return db.opts.Role == "follower"
 }
 
@@ -244,6 +247,25 @@ func (db *DB) walAppend(op OpType, payloadStruct any) {
 		db.log.Error("WAL: append failed — mutation committed but not logged",
 			"op", op, "error", err)
 	}
+}
+
+// SetRole dynamically changes the node's role at runtime.
+// This is called by the Raft election callback when leadership changes.
+// Switching to "follower" causes all subsequent public writes to be rejected.
+// Switching to "leader" re-enables writes.
+func (db *DB) SetRole(role string) {
+	db.mu.Lock()
+	old := db.opts.Role
+	db.opts.Role = role
+	db.mu.Unlock()
+	db.log.Info("role changed", "old", old, "new", role)
+}
+
+// Role returns the current role of this DB instance.
+func (db *DB) Role() string {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	return db.opts.Role
 }
 
 // WAL returns the write-ahead log, or nil if WAL is not enabled.
