@@ -45,6 +45,9 @@ func (db *DB) AddNode(props Props) (NodeID, error) {
 		return 0, fmt.Errorf("graphdb: failed to add node: %w", err)
 	}
 
+	// WAL: log the committed mutation for replication.
+	db.walAppend(OpAddNode, WALAddNode{ID: id, Props: props})
+
 	db.ncache.Put(&Node{ID: id, Props: props})
 	if db.metrics != nil {
 		db.metrics.NodesCreated.Add(1)
@@ -94,6 +97,13 @@ func (db *DB) AddNodeBatch(propsList []Props) ([]NodeID, error) {
 			db.log.Error("batch add failed", "count", len(propsList), "error", err)
 			return nil, fmt.Errorf("graphdb: batch add failed: %w", err)
 		}
+		// WAL: log the batch as a single entry.
+		nodes := make([]WALBatchNode, len(propsList))
+		for i, p := range propsList {
+			nodes[i] = WALBatchNode{ID: ids[i], Props: p}
+		}
+		db.walAppend(OpAddNodeBatch, WALAddNodeBatch{Nodes: nodes})
+
 		db.log.Debug("batch nodes added", "count", len(propsList))
 		return ids, nil
 	}
@@ -139,6 +149,13 @@ func (db *DB) AddNodeBatch(propsList []Props) ([]NodeID, error) {
 			return nil, fmt.Errorf("graphdb: batch add failed on shard %d: %w", shardIdx, err)
 		}
 	}
+
+	// WAL: log the batch as a single entry.
+	nodes := make([]WALBatchNode, len(propsList))
+	for i, p := range propsList {
+		nodes[i] = WALBatchNode{ID: ids[i], Props: p}
+	}
+	db.walAppend(OpAddNodeBatch, WALAddNodeBatch{Nodes: nodes})
 
 	return ids, nil
 }
@@ -236,6 +253,7 @@ func (db *DB) UpdateNode(id NodeID, props Props) error {
 	if err != nil {
 		db.log.Error("failed to update node", "id", id, "error", err)
 	} else {
+		db.walAppend(OpUpdateNode, WALUpdateNode{ID: id, Props: props})
 		db.ncache.Invalidate(id)
 		db.log.Debug("node updated", "id", id)
 	}
@@ -282,6 +300,7 @@ func (db *DB) SetNodeProps(id NodeID, props Props) error {
 	if err != nil {
 		db.log.Error("failed to set node props", "id", id, "error", err)
 	} else {
+		db.walAppend(OpSetNodeProps, WALSetNodeProps{ID: id, Props: props})
 		db.ncache.Invalidate(id)
 		db.log.Debug("node props set", "id", id)
 	}
@@ -342,6 +361,7 @@ func (db *DB) DeleteNode(id NodeID) error {
 	if err != nil {
 		db.log.Error("failed to delete node", "id", id, "error", err)
 	} else {
+		db.walAppend(OpDeleteNode, WALDeleteNode{ID: id})
 		db.ncache.Invalidate(id)
 		if db.metrics != nil {
 			db.metrics.NodesDeleted.Add(1)

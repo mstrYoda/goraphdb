@@ -49,6 +49,7 @@ func (db *DB) CreateIndex(propName string) error {
 
 	// Register the index in memory for the query optimizer.
 	db.indexedProps.Store(propName, true)
+	db.walAppend(OpCreateIndex, WALCreateIndex{PropName: propName})
 	return nil
 }
 
@@ -153,6 +154,7 @@ func (db *DB) DropIndex(propName string) error {
 
 	// Remove from in-memory tracking.
 	db.indexedProps.Delete(propName)
+	db.walAppend(OpDropIndex, WALDropIndex{PropName: propName})
 	return nil
 }
 

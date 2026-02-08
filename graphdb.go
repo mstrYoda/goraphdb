@@ -34,6 +34,7 @@ type DB struct {
 	slowLog          *slowQueryLog  // ring buffer of recent slow queries
 	governor         *queryGovernor // enforces per-query resource limits (row cap, default timeout)
 	compactQuit      chan struct{}  // closed in Close() to stop background compaction goroutine
+	wal              *WAL           // write-ahead log for replication (nil if disabled)
 }
 
 // Open creates or opens a graph database at the given directory path.
@@ -89,6 +90,22 @@ func Open(dir string, opts Options) (*DB, error) {
 	db.governor = &queryGovernor{
 		maxRows:        opts.MaxResultRows,
 		defaultTimeout: opts.DefaultQueryTimeout,
+	}
+
+	// Open WAL if replication is enabled.
+	// The WAL records all committed mutations for follower replay.
+	if opts.EnableWAL {
+		wal, err := OpenWAL(dir, opts.WALNoSync, logger)
+		if err != nil {
+			for _, s := range db.shards {
+				if s != nil {
+					s.close()
+				}
+			}
+			return nil, fmt.Errorf("graphdb: failed to open WAL: %w", err)
+		}
+		db.wal = wal
+		db.log.Info("WAL enabled", "next_lsn", wal.nextLSN.Load())
 	}
 
 	// Start background compaction if configured.
@@ -166,6 +183,13 @@ func (db *DB) Close() error {
 		db.pool.stop()
 	}
 
+	// Close WAL (flush final entries).
+	if db.wal != nil {
+		if err := db.wal.Close(); err != nil {
+			db.log.Error("WAL close error", "error", err)
+		}
+	}
+
 	// Close all shards.
 	var firstErr error
 	for _, s := range db.shards {
@@ -183,6 +207,25 @@ func (db *DB) Close() error {
 	}
 
 	return firstErr
+}
+
+// walAppend is a convenience helper that appends a WAL entry if the WAL is
+// enabled. It encodes the payload, appends the entry, and logs any errors.
+// Called after a successful bbolt commit — the WAL contains only committed ops.
+// Returns nil if the WAL is disabled or the append succeeds.
+func (db *DB) walAppend(op OpType, payloadStruct any) {
+	if db.wal == nil {
+		return
+	}
+	payload, err := encodeWALPayload(payloadStruct)
+	if err != nil {
+		db.log.Error("WAL: failed to encode payload", "op", op, "error", err)
+		return
+	}
+	if _, err := db.wal.Append(op, payload); err != nil {
+		db.log.Error("WAL: append failed — mutation committed but not logged",
+			"op", op, "error", err)
+	}
 }
 
 // Metrics returns the operational metrics collector.

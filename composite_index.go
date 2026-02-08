@@ -70,6 +70,7 @@ func (db *DB) CreateCompositeIndex(propNames ...string) error {
 	}
 
 	db.compositeIndexes.Store(def.Key, def)
+	db.walAppend(OpCreateCompositeIndex, WALCreateCompositeIndex{PropNames: propNames})
 	db.log.Info("composite index created", "properties", def.Properties)
 	return nil
 }
@@ -205,6 +206,7 @@ func (db *DB) DropCompositeIndex(propNames ...string) error {
 	}
 
 	db.compositeIndexes.Delete(def.Key)
+	db.walAppend(OpDropCompositeIndex, WALDropCompositeIndex{PropNames: propNames})
 	db.log.Info("composite index dropped", "properties", def.Properties)
 	return nil
 }

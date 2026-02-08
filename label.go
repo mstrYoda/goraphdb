@@ -60,6 +60,7 @@ func (db *DB) AddNodeWithLabels(labels []string, props Props) (NodeID, error) {
 		return 0, fmt.Errorf("graphdb: failed to add node: %w", err)
 	}
 
+	db.walAppend(OpAddNodeWithLabels, WALAddNodeWithLabels{ID: id, Labels: labels, Props: props})
 	db.ncache.Put(&Node{ID: id, Labels: labels, Props: props})
 	db.log.Debug("node added", "id", id, "labels", labels)
 	return id, nil
@@ -121,6 +122,7 @@ func (db *DB) AddLabel(id NodeID, labels ...string) error {
 	if err != nil {
 		db.log.Error("failed to add labels", "id", id, "labels", labels, "error", err)
 	} else {
+		db.walAppend(OpAddLabel, WALAddLabel{ID: id, Labels: labels})
 		db.ncache.Invalidate(id)
 		db.log.Debug("labels added", "id", id, "labels", labels)
 	}
@@ -182,6 +184,7 @@ func (db *DB) RemoveLabel(id NodeID, labels ...string) error {
 	if err != nil {
 		db.log.Error("failed to remove labels", "id", id, "labels", labels, "error", err)
 	} else {
+		db.walAppend(OpRemoveLabel, WALRemoveLabel{ID: id, Labels: labels})
 		db.ncache.Invalidate(id)
 		db.log.Debug("labels removed", "id", id, "labels", labels)
 	}

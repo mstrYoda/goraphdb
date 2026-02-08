@@ -154,6 +154,17 @@ type Options struct {
 	// Default: 5s. Set to 0 for unlimited waiting (block until slot available).
 	WriteTimeout time.Duration
 
+	// --- Write-Ahead Log (WAL) ---
+
+	// EnableWAL enables the write-ahead log for replication support.
+	// When enabled, all committed mutations are recorded to an append-only
+	// log that followers can replay to stay in sync with the leader.
+	// Default: false (standalone mode — no WAL overhead).
+	EnableWAL bool
+	// WALNoSync skips fsync after each WAL write. Faster but risks losing
+	// the last entry on crash. Only use for testing or benchmarks.
+	WALNoSync bool
+
 	// --- Compaction ---
 
 	// CompactionInterval controls how often background compaction runs.

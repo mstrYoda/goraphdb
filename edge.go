@@ -85,6 +85,7 @@ func (db *DB) AddEdge(from, to NodeID, label string, props Props) (EdgeID, error
 			db.log.Error("failed to add edge", "from", from, "to", to, "label", label, "error", err)
 			return 0, fmt.Errorf("graphdb: failed to add edge: %w", err)
 		}
+		db.walAppend(OpAddEdge, WALAddEdge{ID: id, From: from, To: to, Label: label, Props: props})
 		if db.metrics != nil {
 			db.metrics.EdgesCreated.Add(1)
 		}
@@ -130,6 +131,7 @@ func (db *DB) AddEdge(from, to NodeID, label string, props Props) (EdgeID, error
 		return 0, fmt.Errorf("graphdb: failed to add edge (target shard adj_in): %w", err)
 	}
 
+	db.walAppend(OpAddEdge, WALAddEdge{ID: id, From: from, To: to, Label: label, Props: props})
 	if db.metrics != nil {
 		db.metrics.EdgesCreated.Add(1)
 	}
@@ -197,6 +199,12 @@ func (db *DB) AddEdgeBatch(edges []Edge) ([]EdgeID, error) {
 		if err != nil {
 			return nil, fmt.Errorf("graphdb: batch edge add failed: %w", err)
 		}
+		// WAL: log the batch.
+		walEdges := make([]WALBatchEdge, len(edges))
+		for i, e := range edges {
+			walEdges[i] = WALBatchEdge{ID: e.ID, From: e.From, To: e.To, Label: e.Label, Props: e.Props}
+		}
+		db.walAppend(OpAddEdgeBatch, WALAddEdgeBatch{Edges: walEdges})
 		return ids, nil
 	}
 
@@ -277,6 +285,13 @@ func (db *DB) AddEdgeBatch(edges []Edge) ([]EdgeID, error) {
 		}
 	}
 
+	// WAL: log the batch.
+	walEdges := make([]WALBatchEdge, len(edges))
+	for i, e := range edges {
+		walEdges[i] = WALBatchEdge{ID: e.ID, From: e.From, To: e.To, Label: e.Label, Props: e.Props}
+	}
+	db.walAppend(OpAddEdgeBatch, WALAddEdgeBatch{Edges: walEdges})
+
 	return ids, nil
 }
 
@@ -338,6 +353,8 @@ func (db *DB) DeleteEdge(id EdgeID) error {
 }
 
 // deleteEdgeInternal removes an edge from both source and target shards.
+// WAL logging happens here (not in DeleteEdge) so that cascade deletions
+// from DeleteNode are also captured in the replication log.
 func (db *DB) deleteEdgeInternal(edge *Edge) error {
 	srcShard := db.shardForEdge(edge.From)
 	dstShard := db.shardFor(edge.To)
@@ -361,14 +378,25 @@ func (db *DB) deleteEdgeInternal(edge *Edge) error {
 	}
 
 	// 2) Remove adj_in from target shard.
+	var adjErr error
 	if dstShard == srcShard {
-		return srcShard.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
+		adjErr = srcShard.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
+			return tx.Bucket(bucketAdjIn).Delete(encodeAdjKey(edge.To, edge.ID))
+		})
+	} else {
+		adjErr = dstShard.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
 			return tx.Bucket(bucketAdjIn).Delete(encodeAdjKey(edge.To, edge.ID))
 		})
 	}
-	return dstShard.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
-		return tx.Bucket(bucketAdjIn).Delete(encodeAdjKey(edge.To, edge.ID))
+	if adjErr != nil {
+		return adjErr
+	}
+
+	// WAL: log the edge deletion after all shards have committed.
+	db.walAppend(OpDeleteEdge, WALDeleteEdge{
+		ID: edge.ID, From: edge.From, To: edge.To, Label: edge.Label,
 	})
+	return nil
 }
 
 // UpdateEdge updates the properties of an existing edge (merge).
@@ -401,6 +429,7 @@ func (db *DB) UpdateEdge(id EdgeID, props Props) error {
 	if err != nil {
 		db.log.Error("failed to update edge", "id", id, "error", err)
 	} else {
+		db.walAppend(OpUpdateEdge, WALUpdateEdge{ID: id, From: edge.From, Props: props})
 		db.log.Debug("edge updated", "id", id)
 	}
 	return err
