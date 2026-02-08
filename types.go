@@ -131,6 +131,36 @@ type Options struct {
 	// Logger is the structured logger for all database operations.
 	// If nil, slog.Default() is used.
 	Logger *slog.Logger
+
+	// --- Query Governor ---
+
+	// MaxResultRows is the maximum number of rows a single query can return.
+	// Queries that exceed this limit return ErrResultTooLarge.
+	// Default: 0 (unlimited). A reasonable production value is 100,000.
+	MaxResultRows int
+	// DefaultQueryTimeout is applied when the caller's context has no deadline.
+	// Prevents runaway queries from consuming resources indefinitely.
+	// Default: 0 (no default timeout — caller must set their own).
+	DefaultQueryTimeout time.Duration
+
+	// --- Write Backpressure ---
+
+	// WriteQueueSize is the maximum number of concurrent write operations
+	// allowed per shard. Additional writers block until a slot is available
+	// or their context expires. Default: 64.
+	WriteQueueSize int
+	// WriteTimeout is the maximum time a write operation will wait for a
+	// slot in the write queue before returning ErrWriteQueueFull.
+	// Default: 5s. Set to 0 for unlimited waiting (block until slot available).
+	WriteTimeout time.Duration
+
+	// --- Compaction ---
+
+	// CompactionInterval controls how often background compaction runs.
+	// BoltDB files grow after deletes but never shrink; compaction rewrites
+	// the file to reclaim space. Default: 0 (disabled — call DB.Compact()
+	// manually). A typical production value is 1h.
+	CompactionInterval time.Duration
 }
 
 // DefaultOptions returns sensible defaults for a ~50GB graph database.

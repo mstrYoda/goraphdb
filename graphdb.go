@@ -23,15 +23,17 @@ type DB struct {
 	dir              string
 	shards           []*shard
 	pool             *workerPool
-	cache            queryCache    // Cypher AST cache — avoids re-parsing identical queries
-	ncache           *nodeCache    // LRU hot-node cache — avoids repeated bbolt lookups
-	log              *slog.Logger  // structured logger for all operations
-	mu               sync.Mutex    // only used in Close() to prevent double-close
-	closed           atomic.Bool   // atomic flag — checked by every operation without locking
-	indexedProps     sync.Map      // map[string]bool — tracks which property names have secondary indexes
-	compositeIndexes sync.Map      // map[string]compositeIndexDef — tracks composite indexes
-	metrics          *Metrics      // operational counters (Prometheus-compatible)
-	slowLog          *slowQueryLog // ring buffer of recent slow queries
+	cache            queryCache     // Cypher AST cache — avoids re-parsing identical queries
+	ncache           *nodeCache     // LRU hot-node cache — avoids repeated bbolt lookups
+	log              *slog.Logger   // structured logger for all operations
+	mu               sync.Mutex     // only used in Close() to prevent double-close
+	closed           atomic.Bool    // atomic flag — checked by every operation without locking
+	indexedProps     sync.Map       // map[string]bool — tracks which property names have secondary indexes
+	compositeIndexes sync.Map       // map[string]compositeIndexDef — tracks composite indexes
+	metrics          *Metrics       // operational counters (Prometheus-compatible)
+	slowLog          *slowQueryLog  // ring buffer of recent slow queries
+	governor         *queryGovernor // enforces per-query resource limits (row cap, default timeout)
+	compactQuit      chan struct{}  // closed in Close() to stop background compaction goroutine
 }
 
 // Open creates or opens a graph database at the given directory path.
@@ -84,6 +86,19 @@ func Open(dir string, opts Options) (*DB, error) {
 
 	db.metrics = newMetrics(db)
 	db.slowLog = newSlowQueryLog(100)
+	db.governor = &queryGovernor{
+		maxRows:        opts.MaxResultRows,
+		defaultTimeout: opts.DefaultQueryTimeout,
+	}
+
+	// Start background compaction if configured.
+	// The goroutine periodically rewrites shard files to reclaim disk space
+	// from deleted B+ tree pages. Stopped when compactQuit is closed in Close().
+	db.compactQuit = make(chan struct{})
+	if opts.CompactionInterval > 0 {
+		db.startCompactionLoop(opts.CompactionInterval, db.compactQuit)
+		db.log.Info("background compaction enabled", "interval", opts.CompactionInterval)
+	}
 
 	db.log.Info("database opened",
 		"dir", dir,
@@ -140,6 +155,11 @@ func (db *DB) Close() error {
 		return nil
 	}
 	db.closed.Store(true)
+
+	// Stop background compaction goroutine (if running).
+	if db.compactQuit != nil {
+		close(db.compactQuit)
+	}
 
 	// Stop worker pool.
 	if db.pool != nil {
