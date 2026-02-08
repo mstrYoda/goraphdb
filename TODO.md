@@ -46,8 +46,12 @@
 - [ ] **Bloom Filters** — fast `HasEdge()` checks without touching disk
 - [ ] **Schema Constraints** — unique properties, required fields, edge cardinality rules
 - [x] **Query Timeout & Cancellation** — `CypherContext`/`CypherWithParamsContext` with `context.Context` propagation through all execution strategies; checked at scan loop boundaries
+- [x] **Write Backpressure** — bounded write semaphore per shard (`WriteQueueSize`, `WriteTimeout`) with `acquireWrite()`/`releaseWrite()` wrapping all bbolt `Update()` calls; `ErrWriteQueueFull` on timeout
+- [x] **Query Governor** — `MaxResultRows` row cap enforced at scan/accumulation boundaries; `DefaultQueryTimeout` applied when caller has no deadline; `ErrResultTooLarge` sentinel
+- [x] **Panic Recovery** — `safeExecute()`/`safeExecuteResult()` wrappers with `recover()` + stack trace at all public Cypher entry points; `ErrQueryPanic` sentinel
+- [x] **Snapshot Reads** — `DB.Snapshot()` returns consistent point-in-time read view holding per-shard bbolt read txs; `Snapshot.Cypher()`/`CypherWithParams()`; `Snapshot.Release()`
 - [ ] **Connection Pooling & Rate Limiting** — protect against runaway queries in multi-tenant setups
-- [ ] **Compaction / VACUUM** — rewrite bbolt DB file to reclaim space from deletes
+- [x] **Compaction / VACUUM** — rewrite bbolt DB file to reclaim space from deletes; `shard.compact()` via snapshot→temp→atomic-rename→reopen; `DB.Compact()` public API; optional background goroutine via `Options.CompactionInterval`
 - [x] **Slow Query Log** — configurable `SlowQueryThreshold`, slog warnings, ring buffer of 100 recent entries, `GET /api/slow-queries` endpoint
 - [ ] **Query Audit Log** — who ran what, when (compliance)
 - [ ] **Runtime-Tunable Config** — change log levels, slow-query thresholds, cache sizes without restart
