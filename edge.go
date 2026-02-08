@@ -23,6 +23,9 @@ func (db *DB) AddEdge(from, to NodeID, label string, props Props) (EdgeID, error
 	if db.isClosed() {
 		return 0, fmt.Errorf("graphdb: database is closed")
 	}
+	if err := db.writeGuard(); err != nil {
+		return 0, err
+	}
 
 	// Verify both nodes exist.
 	if err := db.verifyNodeExists(from); err != nil {
@@ -144,6 +147,9 @@ func (db *DB) AddEdge(from, to NodeID, label string, props Props) (EdgeID, error
 func (db *DB) AddEdgeBatch(edges []Edge) ([]EdgeID, error) {
 	if db.isClosed() {
 		return nil, fmt.Errorf("graphdb: database is closed")
+	}
+	if err := db.writeGuard(); err != nil {
+		return nil, err
 	}
 
 	ids := make([]EdgeID, len(edges))
@@ -333,6 +339,9 @@ func (db *DB) DeleteEdge(id EdgeID) error {
 	if db.isClosed() {
 		return fmt.Errorf("graphdb: database is closed")
 	}
+	if err := db.writeGuard(); err != nil {
+		return err
+	}
 
 	// Find the edge first.
 	edge, err := db.getEdge(id)
@@ -403,6 +412,9 @@ func (db *DB) deleteEdgeInternal(edge *Edge) error {
 func (db *DB) UpdateEdge(id EdgeID, props Props) error {
 	if db.isClosed() {
 		return fmt.Errorf("graphdb: database is closed")
+	}
+	if err := db.writeGuard(); err != nil {
+		return err
 	}
 
 	edge, err := db.getEdge(id)

@@ -14,6 +14,9 @@ func (db *DB) AddNodeWithLabels(labels []string, props Props) (NodeID, error) {
 	if db.isClosed() {
 		return 0, fmt.Errorf("graphdb: database is closed")
 	}
+	if err := db.writeGuard(); err != nil {
+		return 0, err
+	}
 
 	s := db.primaryShard()
 	id := s.allocNodeID()
@@ -70,6 +73,9 @@ func (db *DB) AddNodeWithLabels(labels []string, props Props) (NodeID, error) {
 func (db *DB) AddLabel(id NodeID, labels ...string) error {
 	if db.isClosed() {
 		return fmt.Errorf("graphdb: database is closed")
+	}
+	if err := db.writeGuard(); err != nil {
+		return err
 	}
 	if len(labels) == 0 {
 		return nil
@@ -133,6 +139,9 @@ func (db *DB) AddLabel(id NodeID, labels ...string) error {
 func (db *DB) RemoveLabel(id NodeID, labels ...string) error {
 	if db.isClosed() {
 		return fmt.Errorf("graphdb: database is closed")
+	}
+	if err := db.writeGuard(); err != nil {
+		return err
 	}
 	if len(labels) == 0 {
 		return nil

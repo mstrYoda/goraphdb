@@ -40,6 +40,9 @@ func (db *DB) CreateCompositeIndex(propNames ...string) error {
 	if db.isClosed() {
 		return fmt.Errorf("graphdb: database is closed")
 	}
+	if err := db.writeGuard(); err != nil {
+		return err
+	}
 	if len(propNames) < 2 {
 		return fmt.Errorf("graphdb: composite index requires at least 2 properties")
 	}
@@ -177,6 +180,9 @@ func (db *DB) findByCompositeIndexScan(filters map[string]any) ([]*Node, error) 
 func (db *DB) DropCompositeIndex(propNames ...string) error {
 	if db.isClosed() {
 		return fmt.Errorf("graphdb: database is closed")
+	}
+	if err := db.writeGuard(); err != nil {
+		return err
 	}
 
 	def := newCompositeIndexDef(propNames)

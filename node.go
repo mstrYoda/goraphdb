@@ -13,6 +13,9 @@ func (db *DB) AddNode(props Props) (NodeID, error) {
 	if db.isClosed() {
 		return 0, fmt.Errorf("graphdb: database is closed")
 	}
+	if err := db.writeGuard(); err != nil {
+		return 0, err
+	}
 
 	// For sharded mode, allocate ID from primary shard to ensure global uniqueness.
 	s := db.primaryShard()
@@ -69,6 +72,9 @@ func (db *DB) AddNode(props Props) (NodeID, error) {
 func (db *DB) AddNodeBatch(propsList []Props) ([]NodeID, error) {
 	if db.isClosed() {
 		return nil, fmt.Errorf("graphdb: database is closed")
+	}
+	if err := db.writeGuard(); err != nil {
+		return nil, err
 	}
 
 	ids := make([]NodeID, len(propsList))
@@ -212,6 +218,9 @@ func (db *DB) UpdateNode(id NodeID, props Props) error {
 	if db.isClosed() {
 		return fmt.Errorf("graphdb: database is closed")
 	}
+	if err := db.writeGuard(); err != nil {
+		return err
+	}
 
 	s := db.shardFor(id)
 	err := s.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
@@ -266,6 +275,9 @@ func (db *DB) SetNodeProps(id NodeID, props Props) error {
 	if db.isClosed() {
 		return fmt.Errorf("graphdb: database is closed")
 	}
+	if err := db.writeGuard(); err != nil {
+		return err
+	}
 
 	s := db.shardFor(id)
 	err := s.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
@@ -311,6 +323,9 @@ func (db *DB) SetNodeProps(id NodeID, props Props) error {
 func (db *DB) DeleteNode(id NodeID) error {
 	if db.isClosed() {
 		return fmt.Errorf("graphdb: database is closed")
+	}
+	if err := db.writeGuard(); err != nil {
+		return err
 	}
 
 	// First, collect all edges connected to this node.

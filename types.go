@@ -154,6 +154,16 @@ type Options struct {
 	// Default: 5s. Set to 0 for unlimited waiting (block until slot available).
 	WriteTimeout time.Duration
 
+	// --- Replication ---
+
+	// Role determines the node's behavior in a replication cluster.
+	//   - "" or "standalone": no replication (default)
+	//   - "leader": accepts writes, records WAL, ships to followers
+	//   - "follower": read-only, applies WAL entries from leader
+	// When Role is "follower", all direct write API calls (AddNode, AddEdge, etc.)
+	// are rejected with ErrReadOnlyReplica. Only the internal applier can write.
+	Role string
+
 	// --- Write-Ahead Log (WAL) ---
 
 	// EnableWAL enables the write-ahead log for replication support.

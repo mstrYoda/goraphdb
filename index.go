@@ -16,6 +16,9 @@ func (db *DB) CreateIndex(propName string) error {
 	if db.isClosed() {
 		return fmt.Errorf("graphdb: database is closed")
 	}
+	if err := db.writeGuard(); err != nil {
+		return err
+	}
 
 	for _, s := range db.shards {
 		err := s.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
@@ -124,6 +127,9 @@ func (db *DB) FindByProperty(propName string, value interface{}) ([]*Node, error
 func (db *DB) DropIndex(propName string) error {
 	if db.isClosed() {
 		return fmt.Errorf("graphdb: database is closed")
+	}
+	if err := db.writeGuard(); err != nil {
+		return err
 	}
 
 	prefix := []byte(propName + ":")

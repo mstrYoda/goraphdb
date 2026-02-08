@@ -209,6 +209,24 @@ func (db *DB) Close() error {
 	return firstErr
 }
 
+// ErrReadOnlyReplica is returned when a write operation is attempted on a
+// follower node. Followers only accept writes from the internal WAL applier.
+var ErrReadOnlyReplica = fmt.Errorf("graphdb: this is a read-only replica")
+
+// isFollower returns true if this DB instance is configured as a follower.
+func (db *DB) isFollower() bool {
+	return db.opts.Role == "follower"
+}
+
+// writeGuard returns ErrReadOnlyReplica if the DB is a follower.
+// Every public write method should call this before proceeding.
+func (db *DB) writeGuard() error {
+	if db.isFollower() {
+		return ErrReadOnlyReplica
+	}
+	return nil
+}
+
 // walAppend is a convenience helper that appends a WAL entry if the WAL is
 // enabled. It encodes the payload, appends the entry, and logs any errors.
 // Called after a successful bbolt commit — the WAL contains only committed ops.
