@@ -2,13 +2,22 @@ package graphdb
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync/atomic"
+	"time"
 
 	bolt "go.etcd.io/bbolt"
 )
+
+// ErrWriteQueueFull is returned when the write semaphore is full and the
+// caller's context expires before a slot becomes available. This signals
+// that the database is under heavy write pressure and the caller should
+// retry or apply application-level backpressure.
+var ErrWriteQueueFull = errors.New("graphdb: write queue full")
 
 // Bucket names used in bbolt.
 var (
@@ -56,6 +65,15 @@ type shard struct {
 	nextEdgeID atomic.Uint64
 	nodeCount  atomic.Uint64
 	edgeCount  atomic.Uint64
+
+	// writeSem is a bounded semaphore that limits the number of goroutines
+	// waiting to acquire bbolt's single-writer lock. Without this, under
+	// heavy write load, goroutines pile up unbounded on bbolt's internal
+	// mutex, consuming memory and goroutine stacks. The semaphore provides
+	// backpressure: callers block on the channel (respecting context) and
+	// get ErrWriteQueueFull if the queue is full and their deadline expires.
+	writeSem     chan struct{}
+	writeTimeout time.Duration // max wait time for a write slot; 0 = block forever
 }
 
 // openShard opens or creates a bbolt database file at the given path.
@@ -77,7 +95,20 @@ func openShard(path string, opts Options) (*shard, error) {
 		return nil, fmt.Errorf("graphdb: failed to open bolt db at %s: %w", path, err)
 	}
 
-	s := &shard{db: db, path: path}
+	// Default write queue: 64 slots. This allows up to 64 goroutines to
+	// queue for bbolt's single-writer lock. Beyond that, callers block on
+	// the channel and may time out.
+	queueSize := opts.WriteQueueSize
+	if queueSize <= 0 {
+		queueSize = 64
+	}
+
+	s := &shard{
+		db:           db,
+		path:         path,
+		writeSem:     make(chan struct{}, queueSize),
+		writeTimeout: opts.WriteTimeout,
+	}
 
 	// Initialize buckets and load counters.
 	if !opts.ReadOnly {
@@ -178,6 +209,62 @@ func (s *shard) loadCounters() error {
 		s.edgeCount.Store(eCount)
 		return nil
 	})
+}
+
+// ---------------------------------------------------------------------------
+// Write backpressure — bounded semaphore protecting bbolt's single-writer lock.
+// ---------------------------------------------------------------------------
+
+// acquireWrite obtains a slot in the write semaphore, blocking until a slot
+// is available, the context is cancelled, or the write timeout expires.
+//
+// The flow is:
+//  1. Try to send on writeSem (buffered channel) — succeeds immediately if
+//     the queue has capacity.
+//  2. If the channel is full, block until a slot opens or the deadline fires.
+//  3. On timeout/cancellation, return ErrWriteQueueFull.
+//
+// The caller MUST call releaseWrite() when the write operation completes.
+func (s *shard) acquireWrite(ctx context.Context) error {
+	// If a write timeout is configured and the caller has no deadline,
+	// apply it so writes don't block indefinitely under contention.
+	if s.writeTimeout > 0 {
+		if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, s.writeTimeout)
+			defer cancel()
+		}
+	}
+
+	select {
+	case s.writeSem <- struct{}{}:
+		return nil // acquired
+	default:
+		// Channel full — wait with context.
+		select {
+		case s.writeSem <- struct{}{}:
+			return nil
+		case <-ctx.Done():
+			return fmt.Errorf("%w: %v", ErrWriteQueueFull, ctx.Err())
+		}
+	}
+}
+
+// releaseWrite returns a slot to the write semaphore. Must be called exactly
+// once after a successful acquireWrite.
+func (s *shard) releaseWrite() {
+	<-s.writeSem
+}
+
+// writeUpdate is a convenience wrapper that acquires the write semaphore,
+// executes a bbolt Update transaction, and releases the semaphore.
+// All public write methods should use this instead of calling s.db.Update directly.
+func (s *shard) writeUpdate(ctx context.Context, fn func(tx *bolt.Tx) error) error {
+	if err := s.acquireWrite(ctx); err != nil {
+		return err
+	}
+	defer s.releaseWrite()
+	return s.db.Update(fn)
 }
 
 // allocNodeID atomically allocates a new node ID.

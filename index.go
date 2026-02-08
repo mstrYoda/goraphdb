@@ -2,6 +2,7 @@ package graphdb
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 
 	bolt "go.etcd.io/bbolt"
@@ -17,7 +18,7 @@ func (db *DB) CreateIndex(propName string) error {
 	}
 
 	for _, s := range db.shards {
-		err := s.db.Update(func(tx *bolt.Tx) error {
+		err := s.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
 			idxBucket := tx.Bucket(bucketIdxProp)
 			nodesBucket := tx.Bucket(bucketNodes)
 
@@ -127,7 +128,7 @@ func (db *DB) DropIndex(propName string) error {
 	prefix := []byte(propName + ":")
 
 	for _, s := range db.shards {
-		err := s.db.Update(func(tx *bolt.Tx) error {
+		err := s.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
 			idxBucket := tx.Bucket(bucketIdxProp)
 			c := idxBucket.Cursor()
 

@@ -2,6 +2,7 @@ package graphdb
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 
 	bolt "go.etcd.io/bbolt"
@@ -47,7 +48,7 @@ func (db *DB) AddEdge(from, to NodeID, label string, props Props) (EdgeID, error
 
 	if srcShard == dstShard {
 		// Same shard: single transaction = single fsync.
-		err := srcShard.db.Update(func(tx *bolt.Tx) error {
+		err := srcShard.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
 			edgeData, err := encodeEdge(edge)
 			if err != nil {
 				return err
@@ -93,7 +94,7 @@ func (db *DB) AddEdge(from, to NodeID, label string, props Props) (EdgeID, error
 
 	// Different shards: two transactions (one fsync each).
 	// 1) Edge data + adj_out + index in source shard.
-	err := srcShard.db.Update(func(tx *bolt.Tx) error {
+	err := srcShard.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
 		edgeData, err := encodeEdge(edge)
 		if err != nil {
 			return err
@@ -119,7 +120,7 @@ func (db *DB) AddEdge(from, to NodeID, label string, props Props) (EdgeID, error
 	}
 
 	// 2) adj_in in target shard.
-	err = dstShard.db.Update(func(tx *bolt.Tx) error {
+	err = dstShard.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketAdjIn).Put(
 			encodeAdjKey(to, id), encodeAdjValue(from, label),
 		)
@@ -148,7 +149,7 @@ func (db *DB) AddEdgeBatch(edges []Edge) ([]EdgeID, error) {
 	if len(db.shards) == 1 {
 		// Single-shard fast path: everything in one transaction.
 		s := db.shards[0]
-		err := s.db.Update(func(tx *bolt.Tx) error {
+		err := s.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
 			edgeBucket := tx.Bucket(bucketEdges)
 			adjOutBucket := tx.Bucket(bucketAdjOut)
 			adjInBucket := tx.Bucket(bucketAdjIn)
@@ -227,7 +228,7 @@ func (db *DB) AddEdgeBatch(edges []Edge) ([]EdgeID, error) {
 
 	// Step 1: write edge data + adj_out + edge-type index per source shard.
 	for s, batch := range srcGroups {
-		err := s.db.Update(func(tx *bolt.Tx) error {
+		err := s.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
 			edgeBucket := tx.Bucket(bucketEdges)
 			adjOutBucket := tx.Bucket(bucketAdjOut)
 			idxBucket := tx.Bucket(bucketIdxEdgeTyp)
@@ -259,7 +260,7 @@ func (db *DB) AddEdgeBatch(edges []Edge) ([]EdgeID, error) {
 
 	// Step 2: write adj_in entries per destination shard.
 	for s, batch := range dstGroups {
-		err := s.db.Update(func(tx *bolt.Tx) error {
+		err := s.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
 			adjInBucket := tx.Bucket(bucketAdjIn)
 			for _, entry := range batch {
 				if err := adjInBucket.Put(
@@ -342,7 +343,7 @@ func (db *DB) deleteEdgeInternal(edge *Edge) error {
 	dstShard := db.shardFor(edge.To)
 
 	// 1) Remove edge data + adj_out + edge-type index from source shard.
-	err := srcShard.db.Update(func(tx *bolt.Tx) error {
+	err := srcShard.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
 		if err := tx.Bucket(bucketEdges).Delete(encodeEdgeID(edge.ID)); err != nil {
 			return err
 		}
@@ -361,11 +362,11 @@ func (db *DB) deleteEdgeInternal(edge *Edge) error {
 
 	// 2) Remove adj_in from target shard.
 	if dstShard == srcShard {
-		return srcShard.db.Update(func(tx *bolt.Tx) error {
+		return srcShard.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
 			return tx.Bucket(bucketAdjIn).Delete(encodeAdjKey(edge.To, edge.ID))
 		})
 	}
-	return dstShard.db.Update(func(tx *bolt.Tx) error {
+	return dstShard.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketAdjIn).Delete(encodeAdjKey(edge.To, edge.ID))
 	})
 }
@@ -390,7 +391,7 @@ func (db *DB) UpdateEdge(id EdgeID, props Props) error {
 	}
 
 	s := db.shardForEdge(edge.From)
-	err = s.db.Update(func(tx *bolt.Tx) error {
+	err = s.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
 		data, err := encodeEdge(edge)
 		if err != nil {
 			return err

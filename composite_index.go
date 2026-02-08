@@ -2,6 +2,7 @@ package graphdb
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"sort"
@@ -46,7 +47,7 @@ func (db *DB) CreateCompositeIndex(propNames ...string) error {
 	def := newCompositeIndexDef(propNames)
 
 	for _, s := range db.shards {
-		err := s.db.Update(func(tx *bolt.Tx) error {
+		err := s.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
 			idxBucket := tx.Bucket(bucketIdxComposite)
 			nodesBucket := tx.Bucket(bucketNodes)
 
@@ -181,7 +182,7 @@ func (db *DB) DropCompositeIndex(propNames ...string) error {
 	prefix := compositeDefPrefix(def)
 
 	for _, s := range db.shards {
-		err := s.db.Update(func(tx *bolt.Tx) error {
+		err := s.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
 			idxBucket := tx.Bucket(bucketIdxComposite)
 			c := idxBucket.Cursor()
 

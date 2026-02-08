@@ -1,6 +1,7 @@
 package graphdb
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/vmihailenco/msgpack/v5"
@@ -31,7 +32,7 @@ func (db *DB) AddNodeWithLabels(labels []string, props Props) (NodeID, error) {
 		}
 	}
 
-	err = target.db.Update(func(tx *bolt.Tx) error {
+	err = target.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
 		if err := tx.Bucket(bucketNodes).Put(encodeNodeID(id), data); err != nil {
 			return err
 		}
@@ -74,7 +75,7 @@ func (db *DB) AddLabel(id NodeID, labels ...string) error {
 	}
 
 	s := db.shardFor(id)
-	err := s.db.Update(func(tx *bolt.Tx) error {
+	err := s.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
 		// Verify node exists.
 		if tx.Bucket(bucketNodes).Get(encodeNodeID(id)) == nil {
 			return fmt.Errorf("graphdb: node %d not found", id)
@@ -136,7 +137,7 @@ func (db *DB) RemoveLabel(id NodeID, labels ...string) error {
 	}
 
 	s := db.shardFor(id)
-	err := s.db.Update(func(tx *bolt.Tx) error {
+	err := s.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
 		if tx.Bucket(bucketNodes).Get(encodeNodeID(id)) == nil {
 			return fmt.Errorf("graphdb: node %d not found", id)
 		}

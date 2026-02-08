@@ -1,6 +1,7 @@
 package graphdb
 
 import (
+	"context"
 	"fmt"
 
 	bolt "go.etcd.io/bbolt"
@@ -25,7 +26,9 @@ func (db *DB) AddNode(props Props) (NodeID, error) {
 		return 0, fmt.Errorf("graphdb: failed to encode node properties: %w", err)
 	}
 
-	err = target.db.Update(func(tx *bolt.Tx) error {
+	// writeUpdate acquires the write semaphore before entering bbolt's
+	// single-writer lock, providing bounded backpressure under load.
+	err = target.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketNodes)
 		if err := b.Put(encodeNodeID(id), data); err != nil {
 			return err
@@ -70,7 +73,7 @@ func (db *DB) AddNodeBatch(propsList []Props) ([]NodeID, error) {
 	if len(db.shards) == 1 {
 		// Single-shard fast path: all nodes go into one transaction.
 		s := db.shards[0]
-		err := s.db.Update(func(tx *bolt.Tx) error {
+		err := s.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
 			b := tx.Bucket(bucketNodes)
 			for i, props := range propsList {
 				id := s.allocNodeID()
@@ -122,7 +125,7 @@ func (db *DB) AddNodeBatch(propsList []Props) ([]NodeID, error) {
 	// Write each shard's batch in a separate transaction.
 	for shardIdx, entries := range shardGroups {
 		target := db.shards[shardIdx]
-		err := target.db.Update(func(tx *bolt.Tx) error {
+		err := target.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
 			b := tx.Bucket(bucketNodes)
 			for _, e := range entries {
 				if err := b.Put(encodeNodeID(e.id), e.data); err != nil {
@@ -194,7 +197,7 @@ func (db *DB) UpdateNode(id NodeID, props Props) error {
 	}
 
 	s := db.shardFor(id)
-	err := s.db.Update(func(tx *bolt.Tx) error {
+	err := s.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketNodes)
 		key := encodeNodeID(id)
 
@@ -247,7 +250,7 @@ func (db *DB) SetNodeProps(id NodeID, props Props) error {
 	}
 
 	s := db.shardFor(id)
-	err := s.db.Update(func(tx *bolt.Tx) error {
+	err := s.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketNodes)
 		key := encodeNodeID(id)
 
@@ -306,7 +309,7 @@ func (db *DB) DeleteNode(id NodeID) error {
 
 	// Delete the node itself (and clean up index entries).
 	s := db.shardFor(id)
-	err = s.db.Update(func(tx *bolt.Tx) error {
+	err = s.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketNodes)
 		key := encodeNodeID(id)
 
