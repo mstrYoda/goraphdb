@@ -50,20 +50,30 @@ func (db *DB) CypherStream(ctx context.Context, query string) (RowIterator, erro
 		return nil, fmt.Errorf("graphdb: database is closed")
 	}
 
-	ast := db.cache.get(query)
-	if ast == nil {
-		parsed, err := parseCypher(query)
-		if err != nil {
-			return nil, err
-		}
-		if parsed.write != nil {
-			return nil, fmt.Errorf("graphdb: CypherStream does not support CREATE queries")
-		}
-		ast = parsed.read
-		db.cache.put(query, ast)
-	}
+	return safeExecuteResult(func() (RowIterator, error) {
+		ctx, cancel := db.governor.wrapContext(ctx)
+		// NOTE: we do NOT defer cancel() here because the iterator may outlive
+		// this function. The cancel will fire when the context's timeout expires
+		// or the parent context is cancelled, which is the desired behavior.
+		_ = cancel
 
-	return db.buildIterator(ctx, ast)
+		ast := db.cache.get(query)
+		if ast == nil {
+			parsed, err := parseCypher(query)
+			if err != nil {
+				cancel()
+				return nil, err
+			}
+			if parsed.write != nil {
+				cancel()
+				return nil, fmt.Errorf("graphdb: CypherStream does not support CREATE queries")
+			}
+			ast = parsed.read
+			db.cache.put(query, ast)
+		}
+
+		return db.buildIterator(ctx, ast)
+	})
 }
 
 // CypherStreamWithParams is the parameterized version of CypherStream.
@@ -72,26 +82,34 @@ func (db *DB) CypherStreamWithParams(ctx context.Context, query string, params m
 		return nil, fmt.Errorf("graphdb: database is closed")
 	}
 
-	ast := db.cache.get(query)
-	if ast == nil {
-		parsed, err := parseCypher(query)
-		if err != nil {
-			return nil, err
-		}
-		if parsed.write != nil {
-			return nil, fmt.Errorf("graphdb: CypherStreamWithParams does not support CREATE queries")
-		}
-		ast = parsed.read
-		db.cache.put(query, ast)
-	}
+	return safeExecuteResult(func() (RowIterator, error) {
+		ctx, cancel := db.governor.wrapContext(ctx)
+		_ = cancel // see CypherStream comment about iterator lifetime
 
-	resolved := *ast
-	if len(params) > 0 {
-		if err := resolveParams(&resolved, params); err != nil {
-			return nil, err
+		ast := db.cache.get(query)
+		if ast == nil {
+			parsed, err := parseCypher(query)
+			if err != nil {
+				cancel()
+				return nil, err
+			}
+			if parsed.write != nil {
+				cancel()
+				return nil, fmt.Errorf("graphdb: CypherStreamWithParams does not support CREATE queries")
+			}
+			ast = parsed.read
+			db.cache.put(query, ast)
 		}
-	}
-	return db.buildIterator(ctx, &resolved)
+
+		resolved := *ast
+		if len(params) > 0 {
+			if err := resolveParams(&resolved, params); err != nil {
+				cancel()
+				return nil, err
+			}
+		}
+		return db.buildIterator(ctx, &resolved)
+	})
 }
 
 // buildIterator constructs a RowIterator for the given parsed query.

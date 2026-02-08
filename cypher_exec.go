@@ -47,43 +47,51 @@ func (db *DB) Cypher(ctx context.Context, query string) (*CypherResult, error) {
 		return nil, fmt.Errorf("graphdb: database is closed")
 	}
 
-	// Try cache first (only read queries are cached).
-	ast := db.cache.get(query)
-	if ast != nil {
-		return db.executeCypherRead(ctx, query, ast)
-	}
+	// Panic recovery: any panic inside query execution is caught and
+	// returned as an error wrapping ErrQueryPanic, keeping the DB operational.
+	return safeExecuteResult(func() (*CypherResult, error) {
+		// Apply default query timeout if the caller didn't set a deadline.
+		ctx, cancel := db.governor.wrapContext(ctx)
+		defer cancel()
 
-	// Parse — may be read or write.
-	parsed, err := parseCypher(query)
-	if err != nil {
-		return nil, err
-	}
-
-	// CREATE query — execute write path.
-	if parsed.write != nil {
-		start := time.Now()
-		cr, err := db.executeCreate(ctx, parsed.write)
-		elapsed := time.Since(start)
-		if db.metrics != nil {
-			db.metrics.QueriesTotal.Add(1)
-			db.metrics.recordQueryDuration(elapsed)
-			if err != nil {
-				db.metrics.QueryErrorTotal.Add(1)
-			}
+		// Try cache first (only read queries are cached).
+		ast := db.cache.get(query)
+		if ast != nil {
+			return db.executeCypherRead(ctx, query, ast)
 		}
+
+		// Parse — may be read or write.
+		parsed, err := parseCypher(query)
 		if err != nil {
 			return nil, err
 		}
-		// Convert CypherCreateResult to CypherResult for unified API.
-		return &CypherResult{
-			Columns: cr.Columns,
-			Rows:    cr.Rows,
-		}, nil
-	}
 
-	// MATCH query — cache the AST and execute read path.
-	db.cache.put(query, parsed.read)
-	return db.executeCypherRead(ctx, query, parsed.read)
+		// CREATE query — execute write path.
+		if parsed.write != nil {
+			start := time.Now()
+			cr, err := db.executeCreate(ctx, parsed.write)
+			elapsed := time.Since(start)
+			if db.metrics != nil {
+				db.metrics.QueriesTotal.Add(1)
+				db.metrics.recordQueryDuration(elapsed)
+				if err != nil {
+					db.metrics.QueryErrorTotal.Add(1)
+				}
+			}
+			if err != nil {
+				return nil, err
+			}
+			// Convert CypherCreateResult to CypherResult for unified API.
+			return &CypherResult{
+				Columns: cr.Columns,
+				Rows:    cr.Rows,
+			}, nil
+		}
+
+		// MATCH query — cache the AST and execute read path.
+		db.cache.put(query, parsed.read)
+		return db.executeCypherRead(ctx, query, parsed.read)
+	})
 }
 
 // executeCypherRead runs a cached/parsed read query with metrics and slow-query logging.
@@ -122,42 +130,47 @@ func (db *DB) CypherWithParams(ctx context.Context, query string, params map[str
 		return nil, fmt.Errorf("graphdb: database is closed")
 	}
 
-	ast := db.cache.get(query)
-	if ast == nil {
-		parsed, err := parseCypher(query)
-		if err != nil {
+	return safeExecuteResult(func() (*CypherResult, error) {
+		ctx, cancel := db.governor.wrapContext(ctx)
+		defer cancel()
+
+		ast := db.cache.get(query)
+		if ast == nil {
+			parsed, err := parseCypher(query)
+			if err != nil {
+				return nil, err
+			}
+			if parsed.write != nil {
+				return nil, fmt.Errorf("cypher exec: parameterized CREATE queries are not supported")
+			}
+			ast = parsed.read
+			db.cache.put(query, ast)
+		}
+
+		// Deep-copy and resolve parameters so the cached AST is not mutated.
+		resolved := *ast
+		if err := resolveParams(&resolved, params); err != nil {
 			return nil, err
 		}
-		if parsed.write != nil {
-			return nil, fmt.Errorf("cypher exec: parameterized CREATE queries are not supported")
+
+		start := time.Now()
+		result, err := db.executeCypher(ctx, &resolved)
+		elapsed := time.Since(start)
+
+		if db.metrics != nil {
+			db.metrics.QueriesTotal.Add(1)
+			db.metrics.recordQueryDuration(elapsed)
+			if err != nil {
+				db.metrics.QueryErrorTotal.Add(1)
+			}
 		}
-		ast = parsed.read
-		db.cache.put(query, ast)
-	}
 
-	// Deep-copy and resolve parameters so the cached AST is not mutated.
-	resolved := *ast
-	if err := resolveParams(&resolved, params); err != nil {
-		return nil, err
-	}
-
-	start := time.Now()
-	result, err := db.executeCypher(ctx, &resolved)
-	elapsed := time.Since(start)
-
-	if db.metrics != nil {
-		db.metrics.QueriesTotal.Add(1)
-		db.metrics.recordQueryDuration(elapsed)
-		if err != nil {
-			db.metrics.QueryErrorTotal.Add(1)
+		if err == nil {
+			db.slowQueryCheck(query, elapsed, len(result.Rows))
 		}
-	}
 
-	if err == nil {
-		db.slowQueryCheck(query, elapsed, len(result.Rows))
-	}
-
-	return result, err
+		return result, err
+	})
 }
 
 // resolveParams substitutes $param references in the AST with actual values.
@@ -456,10 +469,19 @@ func (db *DB) execNodeMatch(ctx context.Context, q *CypherQuery) (*CypherResult,
 		if limit > 0 && !hasOrderBy && len(nodes) >= limit {
 			return errLimitReached
 		}
+
+		// Governor: abort if we've accumulated more rows than MaxResultRows.
+		// This prevents OOM on unbounded full scans without a LIMIT clause.
+		if err := db.governor.checkRowCount(len(nodes)); err != nil {
+			return errRowLimitReached
+		}
 		return nil
 	})
 	if errors.Is(err, errContextDone) {
 		return nil, ctx.Err()
+	}
+	if errors.Is(err, errRowLimitReached) {
+		return nil, ErrResultTooLarge
 	}
 	if err != nil && !errors.Is(err, errLimitReached) {
 		return nil, err
@@ -651,6 +673,11 @@ func (db *DB) execSingleHopMatch(ctx context.Context, q *CypherQuery) (*CypherRe
 			}
 
 			rows = append(rows, resultRow{a: a, r: e, b: bNode})
+
+			// Governor: prevent unbounded result accumulation.
+			if err := db.governor.checkRowCount(len(rows)); err != nil {
+				return nil, ErrResultTooLarge
+			}
 		}
 	}
 
@@ -761,11 +788,19 @@ func (db *DB) execSingleHopByEdgeType(ctx context.Context, q *CypherQuery, aPat 
 				}
 
 				rows = append(rows, resultRow{a: aNode, r: edge, b: bNode})
+
+				// Governor: prevent unbounded result accumulation in edge scans.
+				if db.governor.checkRowCount(len(rows)) != nil {
+					return errRowLimitReached
+				}
 			}
 			return nil
 		})
 		if errors.Is(err, errContextDone) {
 			return nil, ctx.Err()
+		}
+		if errors.Is(err, errRowLimitReached) {
+			return nil, ErrResultTooLarge
 		}
 		if err != nil {
 			return nil, err
@@ -848,10 +883,19 @@ func (db *DB) execVarLengthMatch(ctx context.Context, q *CypherQuery) (*CypherRe
 			}
 
 			rows = append(rows, resultRow{a: a, b: bNode})
+
+			// Governor: stop BFS traversal if row limit exceeded.
+			if db.governor.checkRowCount(len(rows)) != nil {
+				return false // stop BFS
+			}
 			return true
 		})
 		if err != nil {
 			return nil, err
+		}
+		// Check after each starting node's BFS completes.
+		if db.governor.checkRowCount(len(rows)) != nil {
+			return nil, ErrResultTooLarge
 		}
 	}
 

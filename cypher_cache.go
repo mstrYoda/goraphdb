@@ -200,7 +200,11 @@ func (db *DB) ExecutePrepared(ctx context.Context, pq *PreparedQuery) (*CypherRe
 	if db.isClosed() {
 		return nil, fmt.Errorf("graphdb: database is closed")
 	}
-	return db.executeCypher(ctx, pq.ast)
+	return safeExecuteResult(func() (*CypherResult, error) {
+		ctx, cancel := db.governor.wrapContext(ctx)
+		defer cancel()
+		return db.executeCypher(ctx, pq.ast)
+	})
 }
 
 // ExecutePreparedWithParams executes a prepared query with parameter substitution.
@@ -211,16 +215,21 @@ func (db *DB) ExecutePreparedWithParams(ctx context.Context, pq *PreparedQuery, 
 	if db.isClosed() {
 		return nil, fmt.Errorf("graphdb: database is closed")
 	}
-	if len(params) == 0 {
-		return db.executeCypher(ctx, pq.ast)
-	}
+	return safeExecuteResult(func() (*CypherResult, error) {
+		ctx, cancel := db.governor.wrapContext(ctx)
+		defer cancel()
 
-	// Deep-copy and resolve parameters so the cached AST is not mutated.
-	resolved := *pq.ast
-	if err := resolveParams(&resolved, params); err != nil {
-		return nil, err
-	}
-	return db.executeCypher(ctx, &resolved)
+		if len(params) == 0 {
+			return db.executeCypher(ctx, pq.ast)
+		}
+
+		// Deep-copy and resolve parameters so the cached AST is not mutated.
+		resolved := *pq.ast
+		if err := resolveParams(&resolved, params); err != nil {
+			return nil, err
+		}
+		return db.executeCypher(ctx, &resolved)
+	})
 }
 
 // QueryCacheStats returns statistics about the query plan cache.

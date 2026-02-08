@@ -186,26 +186,28 @@ func (db *DB) CypherCreate(ctx context.Context, query string) (*CypherCreateResu
 		return nil, fmt.Errorf("graphdb: database is closed")
 	}
 
-	parsed, err := parseCypher(query)
-	if err != nil {
-		return nil, err
-	}
-
-	if parsed.write == nil {
-		return nil, fmt.Errorf("cypher exec: expected CREATE query, got MATCH")
-	}
-
-	start := time.Now()
-	result, err := db.executeCreate(ctx, parsed.write)
-	elapsed := time.Since(start)
-
-	if db.metrics != nil {
-		db.metrics.QueriesTotal.Add(1)
-		db.metrics.recordQueryDuration(elapsed)
+	return safeExecuteResult(func() (*CypherCreateResult, error) {
+		parsed, err := parseCypher(query)
 		if err != nil {
-			db.metrics.QueryErrorTotal.Add(1)
+			return nil, err
 		}
-	}
 
-	return result, err
+		if parsed.write == nil {
+			return nil, fmt.Errorf("cypher exec: expected CREATE query, got MATCH")
+		}
+
+		start := time.Now()
+		result, err := db.executeCreate(ctx, parsed.write)
+		elapsed := time.Since(start)
+
+		if db.metrics != nil {
+			db.metrics.QueriesTotal.Add(1)
+			db.metrics.recordQueryDuration(elapsed)
+			if err != nil {
+				db.metrics.QueryErrorTotal.Add(1)
+			}
+		}
+
+		return result, err
+	})
 }
