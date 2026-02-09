@@ -62,6 +62,13 @@ func (a *Applier) AppliedLSN() uint64 {
 	return a.appliedLSN.Load()
 }
 
+// ResetLSN resets the applied LSN back to zero.
+// This is called when the follower switches to a new leader whose WAL
+// starts from LSN 1 (different LSN space than the previous leader).
+func (a *Applier) ResetLSN() {
+	a.appliedLSN.Store(0)
+}
+
 // Apply replays a single WAL entry on the follower's database.
 // Entries must be applied in LSN order. Returns an error if the entry
 // cannot be applied (e.g., corrupted payload). Skips entries that have

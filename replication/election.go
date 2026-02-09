@@ -84,15 +84,15 @@ type PeerConfig struct {
 
 // Election manages leader election via hashicorp/raft.
 type Election struct {
-	raft         *raft.Raft
-	config       ElectionConfig
-	log          *slog.Logger
-	transport    *raft.NetworkTransport
-	logStore     *raftboltdb.BoltStore
-	stableStore  *raftboltdb.BoltStore
+	raft          *raft.Raft
+	config        ElectionConfig
+	log           *slog.Logger
+	transport     *raft.NetworkTransport
+	logStore      *raftboltdb.BoltStore
+	stableStore   *raftboltdb.BoltStore
 	snapshotStore raft.SnapshotStore
-	observerCh   chan raft.Observation
-	stopCh       chan struct{}
+	observerCh    chan raft.Observation
+	stopCh        chan struct{}
 }
 
 // NewElection creates and starts a Raft node for leader election.
@@ -262,8 +262,13 @@ func (e *Election) Close() error {
 }
 
 // watchLeadership monitors Raft leader observations and triggers callbacks.
+// The callback fires when:
+//   - This node's own role changes (follower ↔ leader)
+//   - The cluster leader changes (important for followers to discover and
+//     connect to the new leader's gRPC replication endpoint)
 func (e *Election) watchLeadership() {
 	var wasLeader bool
+	var lastLeaderID string
 	for {
 		select {
 		case <-e.stopCh:
@@ -274,15 +279,27 @@ func (e *Election) watchLeadership() {
 				continue
 			}
 
-			isLeader := string(leaderObs.LeaderID) == e.config.NodeID
-			if isLeader != wasLeader {
+			currentLeaderID := string(leaderObs.LeaderID)
+			isLeader := currentLeaderID == e.config.NodeID
+
+			// Fire callback if our role changed OR if the leader changed.
+			// The leader-changed check is critical for followers: when a
+			// leader is elected for the first time (or after failover),
+			// the follower's role stays "follower" but it needs to start
+			// (or restart) its replication client pointing to the new leader.
+			roleChanged := isLeader != wasLeader
+			leaderChanged := currentLeaderID != lastLeaderID
+
+			if roleChanged || leaderChanged {
 				wasLeader = isLeader
+				lastLeaderID = currentLeaderID
+
 				if isLeader {
 					e.log.Info("this node is now the LEADER", "node_id", e.config.NodeID)
 				} else {
 					e.log.Info("this node is now a FOLLOWER",
 						"node_id", e.config.NodeID,
-						"leader_id", string(leaderObs.LeaderID),
+						"leader_id", currentLeaderID,
 					)
 				}
 				if e.config.OnRoleChange != nil {

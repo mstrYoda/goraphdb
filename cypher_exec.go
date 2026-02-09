@@ -863,6 +863,10 @@ func (db *DB) execVarLengthMatch(ctx context.Context, q *CypherQuery) (*CypherRe
 		bVar = "_b"
 	}
 
+	// LIMIT push-down: stop early when there is no ORDER BY.
+	limit := q.Limit
+	hasOrderBy := len(q.OrderBy) > 0
+
 	// Find starting nodes.
 	aCandidates, err := db.findCandidates(aPat)
 	if err != nil {
@@ -878,6 +882,15 @@ func (db *DB) execVarLengthMatch(ctx context.Context, q *CypherQuery) (*CypherRe
 	var rows []resultRow
 
 	for _, a := range aCandidates {
+		// Early exit across candidates: already have enough rows.
+		if limit > 0 && !hasOrderBy && len(rows) >= limit {
+			break
+		}
+
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
 		// Use BFS to find all reachable nodes within hop range.
 		var edgeFilter EdgeFilter
 		if rel.Label != "" {
@@ -917,6 +930,11 @@ func (db *DB) execVarLengthMatch(ctx context.Context, q *CypherQuery) (*CypherRe
 			}
 
 			rows = append(rows, resultRow{a: a, b: bNode})
+
+			// LIMIT push-down: stop BFS traversal when we have enough rows.
+			if limit > 0 && !hasOrderBy && len(rows) >= limit {
+				return false // stop BFS
+			}
 
 			// Governor: stop BFS traversal if row limit exceeded.
 			if db.governor.checkRowCount(len(rows)) != nil {
