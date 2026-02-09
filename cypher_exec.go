@@ -614,6 +614,10 @@ func (db *DB) execSingleHopMatch(ctx context.Context, q *CypherQuery) (*CypherRe
 		return db.execSingleHopByEdgeType(ctx, q, aPat, rel, bPat, aVar, rVar, bVar)
 	}
 
+	// LIMIT push-down: stop early when there is no ORDER BY.
+	limit := q.Limit
+	hasOrderBy := len(q.OrderBy) > 0
+
 	// Step 1: Find all candidate "a" nodes.
 	aCandidates, err := db.findCandidates(aPat)
 	if err != nil {
@@ -627,6 +631,12 @@ func (db *DB) execSingleHopMatch(ctx context.Context, q *CypherQuery) (*CypherRe
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+
+		// Early exit across candidates: already have enough rows.
+		if limit > 0 && !hasOrderBy && len(rows) >= limit {
+			break
+		}
+
 		edges, err := db.getEdgesForNode(a.ID, rel.Dir)
 		if err != nil {
 			return nil, err
@@ -674,6 +684,11 @@ func (db *DB) execSingleHopMatch(ctx context.Context, q *CypherQuery) (*CypherRe
 
 			rows = append(rows, resultRow{a: a, r: e, b: bNode})
 
+			// LIMIT push-down: stop scanning edges when we have enough rows.
+			if limit > 0 && !hasOrderBy && len(rows) >= limit {
+				break
+			}
+
 			// Governor: prevent unbounded result accumulation.
 			if err := db.governor.checkRowCount(len(rows)); err != nil {
 				return nil, ErrResultTooLarge
@@ -694,7 +709,18 @@ func (db *DB) execSingleHopByEdgeType(ctx context.Context, q *CypherQuery, aPat 
 	prefix := encodeIndexPrefix(rel.Label)
 	var rows []resultRow
 
+	// LIMIT push-down: when there is no ORDER BY, we can stop scanning
+	// as soon as we have collected enough rows — avoids reading millions
+	// of edges only to discard all but LIMIT.
+	limit := q.Limit
+	hasOrderBy := len(q.OrderBy) > 0
+
 	for _, s := range db.shards {
+		// Early exit across shards: already have enough rows.
+		if limit > 0 && !hasOrderBy && len(rows) >= limit {
+			break
+		}
+
 		err := s.db.View(func(tx *bolt.Tx) error {
 			idxBucket := tx.Bucket(bucketIdxEdgeTyp)
 			edgeBucket := tx.Bucket(bucketEdges)
@@ -789,6 +815,11 @@ func (db *DB) execSingleHopByEdgeType(ctx context.Context, q *CypherQuery, aPat 
 
 				rows = append(rows, resultRow{a: aNode, r: edge, b: bNode})
 
+				// LIMIT push-down: stop scanning when we have enough rows.
+				if limit > 0 && !hasOrderBy && len(rows) >= limit {
+					return errLimitReached
+				}
+
 				// Governor: prevent unbounded result accumulation in edge scans.
 				if db.governor.checkRowCount(len(rows)) != nil {
 					return errRowLimitReached
@@ -796,6 +827,9 @@ func (db *DB) execSingleHopByEdgeType(ctx context.Context, q *CypherQuery, aPat 
 			}
 			return nil
 		})
+		if errors.Is(err, errLimitReached) {
+			break // LIMIT satisfied — stop scanning further shards.
+		}
 		if errors.Is(err, errContextDone) {
 			return nil, ctx.Err()
 		}
