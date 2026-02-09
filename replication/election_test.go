@@ -1,6 +1,9 @@
 package replication
 
 import (
+	"fmt"
+	"net"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -15,9 +18,9 @@ func TestElection_SingleNodeBootstrap(t *testing.T) {
 
 	var isLeader atomic.Bool
 	election, err := NewElection(ElectionConfig{
-		NodeID:   "node1",
-		BindAddr: "127.0.0.1:0",
-		DataDir:  dir,
+		NodeID:    "node1",
+		BindAddr:  "127.0.0.1:0",
+		DataDir:   dir,
 		Bootstrap: true,
 		OnRoleChange: func(leader bool) {
 			isLeader.Store(leader)
@@ -138,5 +141,180 @@ func TestElection_LeaderAddrAndID(t *testing.T) {
 	addr := election.LeaderAddr()
 	if addr == "" {
 		t.Error("expected non-empty leader address")
+	}
+}
+
+// TestElection_ThreeNodeFailover bootstraps a 3-node Raft cluster, waits for
+// a stable leader, kills the leader, and verifies that a new leader is elected
+// from the remaining two nodes (which still form a majority).
+func TestElection_ThreeNodeFailover(t *testing.T) {
+	const numNodes = 3
+
+	// Pre-allocate TCP ports so all nodes know each other's addresses
+	// before the cluster starts. We grab free ports, close the listeners,
+	// then hand those addresses to Raft.
+	addrs := make([]string, numNodes)
+	for i := range addrs {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("allocate port for node%d: %v", i+1, err)
+		}
+		addrs[i] = l.Addr().String()
+		l.Close()
+	}
+
+	// Track role-change callbacks per node.
+	var roleIsLeader [numNodes]atomic.Bool
+
+	// Start all 3 nodes, each bootstrapping with the full cluster config.
+	nodes := make([]*Election, numNodes)
+	for i := 0; i < numNodes; i++ {
+		var peers []PeerConfig
+		for j := 0; j < numNodes; j++ {
+			if j != i {
+				peers = append(peers, PeerConfig{
+					ID:   fmt.Sprintf("node%d", j+1),
+					Addr: addrs[j],
+				})
+			}
+		}
+
+		idx := i // capture for closure
+		e, err := NewElection(ElectionConfig{
+			NodeID:    fmt.Sprintf("node%d", i+1),
+			BindAddr:  addrs[i],
+			DataDir:   filepath.Join(t.TempDir(), fmt.Sprintf("node%d", i+1)),
+			Bootstrap: true,
+			Peers:     peers,
+			OnRoleChange: func(isLeader bool) {
+				roleIsLeader[idx].Store(isLeader)
+			},
+		})
+		if err != nil {
+			for _, n := range nodes {
+				if n != nil {
+					n.Close()
+				}
+			}
+			t.Fatalf("start node%d: %v", i+1, err)
+		}
+		nodes[i] = e
+	}
+
+	// Ensure all nodes are cleaned up.
+	defer func() {
+		for _, n := range nodes {
+			if n != nil {
+				n.Close()
+			}
+		}
+	}()
+
+	// ---- Phase 1: Wait for initial leader election ----
+
+	leaderIdx := -1
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		count := 0
+		for i, n := range nodes {
+			if n != nil && n.IsLeader() {
+				count++
+				leaderIdx = i
+			}
+		}
+		if count == 1 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	if leaderIdx == -1 {
+		t.Fatal("no leader elected within timeout")
+	}
+
+	// Verify exactly one leader.
+	leaderCount := 0
+	for _, n := range nodes {
+		if n != nil && n.IsLeader() {
+			leaderCount++
+		}
+	}
+	if leaderCount != 1 {
+		t.Fatalf("expected exactly 1 leader, got %d", leaderCount)
+	}
+
+	t.Logf("initial leader: node%d (%s)", leaderIdx+1, addrs[leaderIdx])
+
+	// All nodes should agree on who the leader is.
+	expectedLeaderID := fmt.Sprintf("node%d", leaderIdx+1)
+	for i, n := range nodes {
+		if n == nil {
+			continue
+		}
+		waitUntil := time.Now().Add(3 * time.Second)
+		for time.Now().Before(waitUntil) {
+			if n.LeaderID() == expectedLeaderID {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		if id := n.LeaderID(); id != expectedLeaderID {
+			t.Errorf("node%d sees leader=%s, want %s", i+1, id, expectedLeaderID)
+		}
+	}
+
+	// ---- Phase 2: Kill the leader, expect re-election ----
+
+	t.Logf("killing leader node%d...", leaderIdx+1)
+	nodes[leaderIdx].Close()
+	nodes[leaderIdx] = nil
+
+	// Wait for a new leader to emerge from the surviving 2 nodes.
+	newLeaderIdx := -1
+	deadline = time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		for i, n := range nodes {
+			if n != nil && n.IsLeader() {
+				newLeaderIdx = i
+				break
+			}
+		}
+		if newLeaderIdx != -1 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	if newLeaderIdx == -1 {
+		t.Fatal("no new leader elected after killing original leader")
+	}
+
+	if newLeaderIdx == leaderIdx {
+		t.Fatal("new leader should be a different node than the killed one")
+	}
+
+	t.Logf("new leader after failover: node%d (%s)", newLeaderIdx+1, addrs[newLeaderIdx])
+
+	// Verify all surviving nodes agree on the new leader.
+	newLeaderID := fmt.Sprintf("node%d", newLeaderIdx+1)
+	for i, n := range nodes {
+		if n == nil {
+			continue
+		}
+		waitUntil := time.Now().Add(3 * time.Second)
+		for time.Now().Before(waitUntil) {
+			if n.LeaderID() == newLeaderID {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		if id := n.LeaderID(); id != newLeaderID {
+			t.Errorf("node%d sees leader=%s after failover, want %s", i+1, id, newLeaderID)
+		}
+	}
+
+	// The new leader's OnRoleChange callback should have fired.
+	if !roleIsLeader[newLeaderIdx].Load() {
+		t.Error("expected OnRoleChange(true) on the new leader")
 	}
 }
