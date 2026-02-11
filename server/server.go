@@ -150,6 +150,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/edges/cursor", s.handleListEdgesCursor)
 	s.mux.HandleFunc("DELETE /api/edges/{id}", s.handleDeleteEdge)
 
+	// Unique Constraints
+	s.mux.HandleFunc("GET /api/constraints", s.handleListConstraints)
+	s.mux.HandleFunc("POST /api/constraints", s.handleCreateConstraint)
+	s.mux.HandleFunc("DELETE /api/constraints", s.handleDropConstraint)
+
 	// Cluster & Health
 	s.mux.HandleFunc("POST /api/write", s.handleForwardedWrite)
 	s.mux.HandleFunc("GET /api/cluster", s.handleClusterStatus)
@@ -920,14 +925,14 @@ func (s *Server) handleClusterStatus(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	writeJSON(w, 200, map[string]any{
-		"mode":        "cluster",
-		"node_id":     s.cluster.NodeID(),
-		"role":        role,
-		"leader_id":   s.cluster.LeaderID(),
-		"db_role":     s.db.Role(),
-		"http_addr":   s.cluster.HTTPAddr(),
-		"grpc_addr":   s.cluster.GRPCAddr(),
-		"raft_addr":   s.cluster.RaftAddr(),
+		"mode":         "cluster",
+		"node_id":      s.cluster.NodeID(),
+		"role":         role,
+		"leader_id":    s.cluster.LeaderID(),
+		"db_role":      s.db.Role(),
+		"http_addr":    s.cluster.HTTPAddr(),
+		"grpc_addr":    s.cluster.GRPCAddr(),
+		"raft_addr":    s.cluster.RaftAddr(),
 		"wal_last_lsn": s.cluster.WALLastLSN(),
 		"applied_lsn":  s.cluster.AppliedLSN(),
 	})
@@ -1339,6 +1344,56 @@ func intQuery(r *http.Request, key string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+// ---------------------------------------------------------------------------
+// Unique Constraints
+// ---------------------------------------------------------------------------
+
+// handleListConstraints returns all registered unique constraints.
+func (s *Server) handleListConstraints(w http.ResponseWriter, _ *http.Request) {
+	constraints := s.db.ListUniqueConstraints()
+	writeJSON(w, 200, map[string]any{
+		"constraints": constraints,
+	})
+}
+
+// handleCreateConstraint creates a unique constraint on (label, property).
+func (s *Server) handleCreateConstraint(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Label    string `json:"label"`
+		Property string `json:"property"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, 400, map[string]string{"error": "invalid JSON body"})
+		return
+	}
+	if body.Label == "" || body.Property == "" {
+		writeJSON(w, 400, map[string]string{"error": "label and property are required"})
+		return
+	}
+
+	if err := s.db.CreateUniqueConstraint(body.Label, body.Property); err != nil {
+		writeJSON(w, 409, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]string{"status": "created", "label": body.Label, "property": body.Property})
+}
+
+// handleDropConstraint drops a unique constraint on (label, property).
+func (s *Server) handleDropConstraint(w http.ResponseWriter, r *http.Request) {
+	label := r.URL.Query().Get("label")
+	property := r.URL.Query().Get("property")
+	if label == "" || property == "" {
+		writeJSON(w, 400, map[string]string{"error": "label and property query params are required"})
+		return
+	}
+
+	if err := s.db.DropUniqueConstraint(label, property); err != nil {
+		writeJSON(w, 500, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]string{"status": "dropped", "label": label, "property": property})
 }
 
 // FileSize returns the on-disk size of a file, or 0 on error.

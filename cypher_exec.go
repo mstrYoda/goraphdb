@@ -88,6 +88,21 @@ func (db *DB) Cypher(ctx context.Context, query string) (*CypherResult, error) {
 			}, nil
 		}
 
+		// MERGE query — match-or-create path.
+		if parsed.merge != nil {
+			start := time.Now()
+			result, err := db.executeMerge(ctx, parsed.merge)
+			elapsed := time.Since(start)
+			if db.metrics != nil {
+				db.metrics.QueriesTotal.Add(1)
+				db.metrics.recordQueryDuration(elapsed)
+				if err != nil {
+					db.metrics.QueryErrorTotal.Add(1)
+				}
+			}
+			return result, err
+		}
+
 		// MATCH query — cache the AST and execute read path.
 		db.cache.put(query, parsed.read)
 		return db.executeCypherRead(ctx, query, parsed.read)

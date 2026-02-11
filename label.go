@@ -36,6 +36,11 @@ func (db *DB) AddNodeWithLabels(labels []string, props Props) (NodeID, error) {
 	}
 
 	err = target.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
+		// Enforce unique constraints within the same transaction (serialized by bbolt).
+		if err := db.checkUniqueConstraintsInTx(tx, labels, props, 0); err != nil {
+			return err
+		}
+
 		if err := tx.Bucket(bucketNodes).Put(encodeNodeID(id), data); err != nil {
 			return err
 		}
@@ -54,6 +59,10 @@ func (db *DB) AddNodeWithLabels(labels []string, props Props) (NodeID, error) {
 					return err
 				}
 			}
+		}
+		// Update unique constraint index.
+		if err := db.indexUniqueConstraints(tx, id, labels, props); err != nil {
+			return err
 		}
 		target.nodeCount.Add(1)
 		return nil
@@ -83,8 +92,9 @@ func (db *DB) AddLabel(id NodeID, labels ...string) error {
 
 	s := db.shardFor(id)
 	err := s.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
-		// Verify node exists.
-		if tx.Bucket(bucketNodes).Get(encodeNodeID(id)) == nil {
+		// Verify node exists and load its properties.
+		nodeData := tx.Bucket(bucketNodes).Get(encodeNodeID(id))
+		if nodeData == nil {
 			return fmt.Errorf("graphdb: node %d not found", id)
 		}
 
@@ -107,6 +117,16 @@ func (db *DB) AddLabel(id NodeID, labels ...string) error {
 			return nil // nothing new
 		}
 
+		// Enforce unique constraints for the newly added labels.
+		if len(added) > 0 {
+			props, err := decodeProps(nodeData)
+			if err == nil && len(props) > 0 {
+				if err := db.checkUniqueConstraintsInTx(tx, added, props, id); err != nil {
+					return err
+				}
+			}
+		}
+
 		// Persist labels.
 		data, err := msgpack.Marshal(existing)
 		if err != nil {
@@ -121,6 +141,16 @@ func (db *DB) AddLabel(id NodeID, labels ...string) error {
 		for _, l := range added {
 			if err := idxBucket.Put(encodeLabelIndexKey(l, id), nil); err != nil {
 				return err
+			}
+		}
+
+		// Update unique constraint index for the new labels.
+		if len(added) > 0 {
+			props, _ := decodeProps(nodeData)
+			if len(props) > 0 {
+				if err := db.indexUniqueConstraints(tx, id, added, props); err != nil {
+					return err
+				}
 			}
 		}
 		return nil

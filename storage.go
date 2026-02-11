@@ -32,6 +32,8 @@ var (
 	bucketNodeLabels   = []byte("node_labels")    // nodeID → msgpack []string (per-node labels)
 	bucketIdxNodeLabel = []byte("idx_node_label") // "Label\x00" + nodeID → nil (label→node index)
 	bucketIdxComposite = []byte("idx_composite")  // composite property index
+	bucketIdxUnique    = []byte("idx_unique")     // unique constraint value index
+	bucketUniqueMeta   = []byte("unique_meta")    // unique constraint metadata
 
 	// Meta keys
 	metaNextNodeID = []byte("next_node_id")
@@ -53,6 +55,8 @@ var allBuckets = [][]byte{
 	bucketNodeLabels,
 	bucketIdxNodeLabel,
 	bucketIdxComposite,
+	bucketIdxUnique,
+	bucketUniqueMeta,
 }
 
 // shard represents a single bbolt database file (a partition of the graph).

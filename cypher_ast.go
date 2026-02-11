@@ -231,3 +231,30 @@ type CreatePattern struct {
 	Nodes []NodePattern
 	Rels  []RelPattern
 }
+
+// ---------------------------------------------------------------------------
+// Write queries — MERGE
+// ---------------------------------------------------------------------------
+
+// CypherMerge is the top-level AST node for a MERGE query.
+//
+//	MERGE (n:Label {key: value}) RETURN n
+//
+// MERGE finds or creates a node. It first tries to match a node with the
+// given labels and properties. If found, it binds it. If not found, it
+// creates a new node with those labels and properties and binds it.
+//
+// This provides upsert semantics and is typically used with unique constraints
+// to implement "get-or-create" patterns.
+type CypherMerge struct {
+	Pattern MergePattern   // the node pattern to match or create
+	Return  *ReturnClause  // optional RETURN clause
+}
+
+// MergePattern describes a single node to be merged (matched or created).
+// Must have at least one label for the lookup.
+type MergePattern struct {
+	Variable string         // binding variable, may be ""
+	Labels   []string       // required: at least one label
+	Props    map[string]any // match criteria + creation defaults
+}

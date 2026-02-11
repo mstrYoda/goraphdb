@@ -113,6 +113,10 @@ func (a *Applier) Apply(entry *WALEntry) error {
 		err = a.applyCreateCompositeIndex(entry.Payload)
 	case OpDropCompositeIndex:
 		err = a.applyDropCompositeIndex(entry.Payload)
+	case OpCreateUniqueConstraint:
+		err = a.applyCreateUniqueConstraint(entry.Payload)
+	case OpDropUniqueConstraint:
+		err = a.applyDropUniqueConstraint(entry.Payload)
 	default:
 		err = fmt.Errorf("applier: unknown op type %d", entry.Op)
 	}
@@ -678,6 +682,116 @@ func (a *Applier) applyCreateCompositeIndex(payload []byte) error {
 		}
 	}
 	a.db.compositeIndexes.Store(def.Key, def)
+	return nil
+}
+
+func (a *Applier) applyCreateUniqueConstraint(payload []byte) error {
+	var p WALCreateUniqueConstraint
+	if err := msgpack.Unmarshal(payload, &p); err != nil {
+		return err
+	}
+	// Re-run CreateUniqueConstraint logic on the follower.
+	// We bypass writeGuard because the applier is allowed to write.
+	uc := UniqueConstraint{Label: p.Label, Property: p.Property}
+	if _, loaded := a.db.uniqueConstraints.Load(uc.constraintKey()); loaded {
+		return nil // already exists
+	}
+
+	// Build unique index from existing data.
+	seen := make(map[string]NodeID)
+	for _, s := range a.db.shards {
+		err := s.db.View(func(tx *bolt.Tx) error {
+			lblBucket := tx.Bucket(bucketIdxNodeLabel)
+			nodesBucket := tx.Bucket(bucketNodes)
+			prefix := encodeLabelIndexPrefix(p.Label)
+			c := lblBucket.Cursor()
+			for k, _ := c.Seek(prefix); k != nil && hasPrefix(k, prefix); k, _ = c.Next() {
+				if len(k) < len(prefix)+8 {
+					continue
+				}
+				nodeID := decodeNodeID(k[len(prefix):])
+				data := nodesBucket.Get(encodeNodeID(nodeID))
+				if data == nil {
+					continue
+				}
+				props, err := decodeProps(data)
+				if err != nil {
+					continue
+				}
+				val, ok := props[p.Property]
+				if !ok {
+					continue
+				}
+				valStr := fmt.Sprintf("%v", val)
+				seen[valStr] = nodeID
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+
+	for valStr, nodeID := range seen {
+		target := a.db.shardFor(nodeID)
+		err := target.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
+			idxKey := encodeUniqueKey(p.Label, p.Property, valStr)
+			return tx.Bucket(bucketIdxUnique).Put(idxKey, encodeNodeID(nodeID))
+		})
+		if err != nil {
+			return err
+		}
+	}
+
+	err := a.db.primaryShard().writeUpdate(context.Background(), func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketUniqueMeta).Put(encodeConstraintMetaKey(p.Label, p.Property), nil)
+	})
+	if err != nil {
+		return err
+	}
+
+	a.db.uniqueConstraints.Store(uc.constraintKey(), uc)
+	return nil
+}
+
+func (a *Applier) applyDropUniqueConstraint(payload []byte) error {
+	var p WALDropUniqueConstraint
+	if err := msgpack.Unmarshal(payload, &p); err != nil {
+		return err
+	}
+	uc := UniqueConstraint{Label: p.Label, Property: p.Property}
+	if _, loaded := a.db.uniqueConstraints.Load(uc.constraintKey()); !loaded {
+		return nil
+	}
+
+	prefix := encodeUniquePrefix(p.Label, p.Property)
+	for _, s := range a.db.shards {
+		err := s.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
+			idxBucket := tx.Bucket(bucketIdxUnique)
+			c := idxBucket.Cursor()
+			var toDelete [][]byte
+			for k, _ := c.Seek(prefix); k != nil && hasPrefix(k, prefix); k, _ = c.Next() {
+				keyCopy := make([]byte, len(k))
+				copy(keyCopy, k)
+				toDelete = append(toDelete, keyCopy)
+			}
+			for _, k := range toDelete {
+				if err := idxBucket.Delete(k); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+
+	_ = a.db.primaryShard().writeUpdate(context.Background(), func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketUniqueMeta).Delete(encodeConstraintMetaKey(p.Label, p.Property))
+	})
+
+	a.db.uniqueConstraints.Delete(uc.constraintKey())
 	return nil
 }
 

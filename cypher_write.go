@@ -106,20 +106,25 @@ func (db *DB) executeCreatePattern(ctx context.Context, cp CreatePattern, bindin
 			stats.PropsSet++
 		}
 
-		id, err := db.AddNode(props)
-		if err != nil {
-			return fmt.Errorf("cypher exec: CREATE node failed: %w", err)
+		// Use AddNodeWithLabels when labels are present — this enforces
+		// unique constraints atomically within the same transaction.
+		var id NodeID
+		if len(np.Labels) > 0 {
+			var err error
+			id, err = db.AddNodeWithLabels(np.Labels, props)
+			if err != nil {
+				return fmt.Errorf("cypher exec: CREATE node failed: %w", err)
+			}
+			stats.LabelsSet += len(np.Labels)
+		} else {
+			var err error
+			id, err = db.AddNode(props)
+			if err != nil {
+				return fmt.Errorf("cypher exec: CREATE node failed: %w", err)
+			}
 		}
 		nodeIDs[i] = id
 		stats.NodesCreated++
-
-		// Set labels if any.
-		if len(np.Labels) > 0 {
-			if err := db.AddLabel(id, np.Labels...); err != nil {
-				return fmt.Errorf("cypher exec: CREATE set labels failed: %w", err)
-			}
-			stats.LabelsSet += len(np.Labels)
-		}
 
 		// Bind the variable.
 		if np.Variable != "" {
@@ -176,6 +181,110 @@ func (db *DB) executeCreatePattern(ctx context.Context, cp CreatePattern, bindin
 	}
 
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// MERGE executor — match-or-create semantics.
+//
+// MERGE (n:Label {key: value}) tries to find an existing node with the given
+// labels and properties. If found, it binds the node. If not found, it creates
+// a new node with those labels and properties.
+//
+// When a unique constraint exists on (Label, key), the lookup is O(1) per shard
+// via the unique index. Without a constraint, it falls back to a label scan
+// with property filtering.
+// ---------------------------------------------------------------------------
+
+// executeMerge executes a parsed CypherMerge against the database.
+func (db *DB) executeMerge(ctx context.Context, m *CypherMerge) (*CypherResult, error) {
+	if db.isClosed() {
+		return nil, fmt.Errorf("graphdb: database is closed")
+	}
+
+	mp := m.Pattern
+	bindings := make(map[string]any)
+
+	// Step 1: Try to find an existing node matching all labels and properties.
+	var matched *Node
+	if len(mp.Labels) > 0 && len(mp.Props) > 0 {
+		// Optimization: if a unique constraint exists, use O(1) lookup.
+		for propKey, propVal := range mp.Props {
+			if db.HasUniqueConstraint(mp.Labels[0], propKey) {
+				found, err := db.FindByUniqueConstraint(mp.Labels[0], propKey, propVal)
+				if err != nil {
+					return nil, fmt.Errorf("cypher exec: MERGE lookup failed: %w", err)
+				}
+				if found != nil {
+					// Verify all labels and all properties match.
+					if matchLabels(found.Labels, mp.Labels) && matchProps(found.Props, mp.Props) {
+						matched = found
+					}
+				}
+				break // Only need to check one constrained property.
+			}
+		}
+	}
+
+	// Fallback: label scan with property filtering.
+	if matched == nil && len(mp.Labels) > 0 {
+		candidates, err := db.FindByLabel(mp.Labels[0])
+		if err != nil {
+			return nil, fmt.Errorf("cypher exec: MERGE label scan failed: %w", err)
+		}
+		for _, n := range candidates {
+			if matchLabels(n.Labels, mp.Labels) && matchProps(n.Props, mp.Props) {
+				matched = n
+				break
+			}
+		}
+	}
+
+	// Step 2: If no match found, create the node.
+	if matched == nil {
+		if err := db.writeGuard(); err != nil {
+			return nil, err
+		}
+
+		props := make(Props, len(mp.Props))
+		for k, v := range mp.Props {
+			props[k] = v
+		}
+
+		id, err := db.AddNodeWithLabels(mp.Labels, props)
+		if err != nil {
+			return nil, fmt.Errorf("cypher exec: MERGE create failed: %w", err)
+		}
+
+		matched, err = db.getNode(id)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Bind the variable.
+	if mp.Variable != "" {
+		bindings[mp.Variable] = matched
+	}
+
+	// Build result.
+	result := &CypherResult{}
+	if m.Return != nil {
+		for _, item := range m.Return.Items {
+			result.Columns = append(result.Columns, returnItemName(item))
+		}
+		row := make(map[string]any, len(m.Return.Items))
+		for _, item := range m.Return.Items {
+			colName := item.Alias
+			if colName == "" {
+				colName = returnItemName(item)
+			}
+			val, _ := evalExpr(&item.Expr, bindings)
+			row[colName] = val
+		}
+		result.Rows = append(result.Rows, row)
+	}
+
+	return result, nil
 }
 
 // CypherCreate executes a CREATE Cypher query string.

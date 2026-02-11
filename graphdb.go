@@ -28,8 +28,9 @@ type DB struct {
 	log              *slog.Logger   // structured logger for all operations
 	mu               sync.Mutex     // only used in Close() to prevent double-close
 	closed           atomic.Bool    // atomic flag — checked by every operation without locking
-	indexedProps     sync.Map       // map[string]bool — tracks which property names have secondary indexes
-	compositeIndexes sync.Map       // map[string]compositeIndexDef — tracks composite indexes
+	indexedProps       sync.Map     // map[string]bool — tracks which property names have secondary indexes
+	compositeIndexes   sync.Map     // map[string]compositeIndexDef — tracks composite indexes
+	uniqueConstraints  sync.Map     // map[string]UniqueConstraint — tracks unique constraints
 	metrics          *Metrics       // operational counters (Prometheus-compatible)
 	slowLog          *slowQueryLog  // ring buffer of recent slow queries
 	governor         *queryGovernor // enforces per-query resource limits (row cap, default timeout)
@@ -81,9 +82,10 @@ func Open(dir string, opts Options) (*DB, error) {
 	// Start the worker pool for concurrent queries.
 	db.pool = newWorkerPool(opts.WorkerPoolSize)
 
-	// Discover existing property indexes from disk (survives restart).
+	// Discover existing property indexes and constraints from disk (survives restart).
 	db.discoverIndexes()
 	db.discoverCompositeIndexes()
+	db.discoverUniqueConstraints()
 
 	db.metrics = newMetrics(db)
 	db.slowLog = newSlowQueryLog(100)

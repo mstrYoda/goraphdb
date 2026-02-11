@@ -45,6 +45,7 @@ const (
 	tokProfile  // PROFILE
 	tokOptional // OPTIONAL
 	tokCreate   // CREATE
+	tokMerge    // MERGE
 
 	// Operators
 	tokEq  // =
@@ -138,6 +139,8 @@ func tokenKindName(k TokenKind) string {
 		return "OPTIONAL"
 	case tokCreate:
 		return "CREATE"
+	case tokMerge:
+		return "MERGE"
 	case tokEq:
 		return "="
 	case tokNeq:
@@ -207,6 +210,7 @@ var keywords = map[string]TokenKind{
 	"PROFILE":  tokProfile,
 	"OPTIONAL": tokOptional,
 	"CREATE":   tokCreate,
+	"MERGE":    tokMerge,
 }
 
 // lexer holds the state for tokenising a Cypher string.

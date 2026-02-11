@@ -248,6 +248,16 @@ func (db *DB) UpdateNode(id NodeID, props Props) error {
 			oldProps[k] = v
 		}
 
+		// Enforce unique constraints on the merged properties.
+		labels := loadLabels(tx, id)
+		if len(labels) > 0 {
+			// Unindex old unique values, check new ones, then re-index.
+			_ = db.unindexUniqueConstraints(tx, id, labels, oldProps)
+			if err := db.checkUniqueConstraintsInTx(tx, labels, oldProps, id); err != nil {
+				return err
+			}
+		}
+
 		data, err := encodeProps(oldProps)
 		if err != nil {
 			return err
@@ -257,7 +267,14 @@ func (db *DB) UpdateNode(id NodeID, props Props) error {
 		}
 
 		// Add new index entries with merged properties.
-		return db.indexNodeProps(tx, id, oldProps)
+		if err := db.indexNodeProps(tx, id, oldProps); err != nil {
+			return err
+		}
+		// Re-index unique constraints with new values.
+		if len(labels) > 0 {
+			_ = db.indexUniqueConstraints(tx, id, labels, oldProps)
+		}
+		return nil
 	})
 	if err != nil {
 		db.log.Error("failed to update node", "id", id, "error", err)
@@ -298,6 +315,15 @@ func (db *DB) SetNodeProps(id NodeID, props Props) error {
 			return err
 		}
 
+		// Enforce unique constraints on the new properties.
+		labels := loadLabels(tx, id)
+		if len(labels) > 0 {
+			_ = db.unindexUniqueConstraints(tx, id, labels, oldProps)
+			if err := db.checkUniqueConstraintsInTx(tx, labels, props, id); err != nil {
+				return err
+			}
+		}
+
 		data, err := encodeProps(props)
 		if err != nil {
 			return err
@@ -307,7 +333,13 @@ func (db *DB) SetNodeProps(id NodeID, props Props) error {
 		}
 
 		// Add new index entries.
-		return db.indexNodeProps(tx, id, props)
+		if err := db.indexNodeProps(tx, id, props); err != nil {
+			return err
+		}
+		if len(labels) > 0 {
+			_ = db.indexUniqueConstraints(tx, id, labels, props)
+		}
+		return nil
 	})
 	if err != nil {
 		db.log.Error("failed to set node props", "id", id, "error", err)
@@ -353,13 +385,18 @@ func (db *DB) DeleteNode(id NodeID) error {
 		}
 
 		// Remove property index entries before deleting the node.
-		if props, err := decodeProps(existing); err == nil {
+		props, _ := decodeProps(existing)
+		if len(props) > 0 {
 			_ = db.unindexNodeProps(tx, id, props)
 		}
 
-		// Remove label index entries.
+		// Remove label index entries and unique constraint index.
 		labels := loadLabels(tx, id)
 		if len(labels) > 0 {
+			// Clean up unique constraint index entries.
+			if len(props) > 0 {
+				_ = db.unindexUniqueConstraints(tx, id, labels, props)
+			}
 			idxBucket := tx.Bucket(bucketIdxNodeLabel)
 			for _, l := range labels {
 				_ = idxBucket.Delete(encodeLabelIndexKey(l, id))

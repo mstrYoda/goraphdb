@@ -40,10 +40,11 @@ type parser struct {
 	pos    int
 }
 
-// parsedCypher holds the result of parsing — either a read or write query.
+// parsedCypher holds the result of parsing — either a read, write, or merge query.
 type parsedCypher struct {
 	read  *CypherQuery // non-nil for MATCH queries
 	write *CypherWrite // non-nil for CREATE queries
+	merge *CypherMerge // non-nil for MERGE queries
 }
 
 // parseCypher is the entry point: tokenise + parse a Cypher query string.
@@ -61,6 +62,14 @@ func parseCypher(input string) (*parsedCypher, error) {
 			return nil, err
 		}
 		return &parsedCypher{write: w}, nil
+	}
+
+	if p.is(tokMerge) {
+		m, err := p.parseMergeQuery()
+		if err != nil {
+			return nil, err
+		}
+		return &parsedCypher{merge: m}, nil
 	}
 
 	q, err := p.parseQuery()
@@ -742,6 +751,53 @@ func (p *parser) parseCreateQuery() (*CypherWrite, error) {
 	}
 
 	return w, nil
+}
+
+// parseMergeQuery parses:
+//
+//	MERGE (n:Label {props}) [RETURN returnItems]
+//
+// MERGE is an upsert operation: it matches an existing node or creates a new one.
+// The node pattern MUST have at least one label for the lookup.
+func (p *parser) parseMergeQuery() (*CypherMerge, error) {
+	m := &CypherMerge{}
+
+	if _, err := p.expect(tokMerge); err != nil {
+		return nil, err
+	}
+
+	// Parse the single node pattern.
+	node, err := p.parseNodePattern()
+	if err != nil {
+		return nil, fmt.Errorf("cypher parser: MERGE requires a node pattern: %w", err)
+	}
+
+	if len(node.Labels) == 0 {
+		return nil, fmt.Errorf("cypher parser: MERGE node must have at least one label at position %d", p.cur().Pos)
+	}
+
+	m.Pattern = MergePattern{
+		Variable: node.Variable,
+		Labels:   node.Labels,
+		Props:    node.Props,
+	}
+
+	// Optional RETURN clause.
+	if p.is(tokReturn) {
+		ret, err := p.parseReturnClause()
+		if err != nil {
+			return nil, err
+		}
+		m.Return = &ret
+	}
+
+	// Should be at EOF now.
+	if !p.is(tokEOF) {
+		return nil, fmt.Errorf("cypher parser: unexpected token %s at position %d after MERGE",
+			tokenKindName(p.cur().Kind), p.cur().Pos)
+	}
+
+	return m, nil
 }
 
 // parseCreatePattern parses a single CREATE pattern:

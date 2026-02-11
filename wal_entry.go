@@ -36,6 +36,8 @@ const (
 	OpDropIndex                              // drop property index
 	OpCreateCompositeIndex                   // create composite property index
 	OpDropCompositeIndex                     // drop composite property index
+	OpCreateUniqueConstraint                 // create unique constraint on (label, property)
+	OpDropUniqueConstraint                   // drop unique constraint
 )
 
 // String returns a human-readable name for the operation type.
@@ -73,6 +75,10 @@ func (op OpType) String() string {
 		return "CreateCompositeIndex"
 	case OpDropCompositeIndex:
 		return "DropCompositeIndex"
+	case OpCreateUniqueConstraint:
+		return "CreateUniqueConstraint"
+	case OpDropUniqueConstraint:
+		return "DropUniqueConstraint"
 	default:
 		return "Unknown"
 	}
@@ -205,6 +211,18 @@ type WALCreateCompositeIndex struct {
 // WALDropCompositeIndex is the payload for OpDropCompositeIndex.
 type WALDropCompositeIndex struct {
 	PropNames []string `msgpack:"prop_names"`
+}
+
+// WALCreateUniqueConstraint is the payload for OpCreateUniqueConstraint.
+type WALCreateUniqueConstraint struct {
+	Label    string `msgpack:"label"`
+	Property string `msgpack:"property"`
+}
+
+// WALDropUniqueConstraint is the payload for OpDropUniqueConstraint.
+type WALDropUniqueConstraint struct {
+	Label    string `msgpack:"label"`
+	Property string `msgpack:"property"`
 }
 
 // ---------------------------------------------------------------------------
