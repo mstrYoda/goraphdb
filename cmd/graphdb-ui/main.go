@@ -106,11 +106,12 @@ func main() {
 
 	srv := server.New(db, *uiDir)
 
-	// Wire the cluster router into the HTTP server for transparent
-	// write forwarding. Followers will forward writes to the leader
-	// via the Router; the leader executes them locally.
+	// Wire cluster components into the HTTP server.
+	// - Router: transparent write forwarding (followers → leader)
+	// - Cluster: /api/cluster status endpoint
 	if cluster != nil {
 		srv.SetRouter(cluster.Router())
+		srv.SetCluster(cluster)
 	}
 
 	fmt.Println("╔══════════════════════════════════════╗")

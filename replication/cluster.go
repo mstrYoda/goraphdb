@@ -368,6 +368,11 @@ func (cm *ClusterManager) Applier() *graphdb.Applier {
 	return cm.applier
 }
 
+// NodeID returns this node's unique identifier.
+func (cm *ClusterManager) NodeID() string {
+	return cm.config.NodeID
+}
+
 // IsLeader returns true if this node is currently the Raft leader.
 func (cm *ClusterManager) IsLeader() bool {
 	return cm.election.IsLeader()
@@ -376,6 +381,26 @@ func (cm *ClusterManager) IsLeader() bool {
 // LeaderID returns the ID of the current leader, or empty if unknown.
 func (cm *ClusterManager) LeaderID() string {
 	return cm.election.LeaderID()
+}
+
+// Peers returns the configured cluster peers.
+func (cm *ClusterManager) Peers() []ClusterPeer {
+	return cm.config.Peers
+}
+
+// HTTPAddr returns this node's HTTP address.
+func (cm *ClusterManager) HTTPAddr() string {
+	return cm.config.HTTPAddr
+}
+
+// GRPCAddr returns this node's gRPC address.
+func (cm *ClusterManager) GRPCAddr() string {
+	return cm.config.GRPCAddr
+}
+
+// RaftAddr returns this node's Raft address.
+func (cm *ClusterManager) RaftAddr() string {
+	return cm.config.RaftBindAddr
 }
 
 // Close shuts down the cluster manager, stopping the replication client,

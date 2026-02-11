@@ -38,6 +38,18 @@ type WriteForwarder interface {
 }
 
 // ---------------------------------------------------------------------------
+// Cluster Info Interface
+// ---------------------------------------------------------------------------
+
+// ClusterInfoProvider provides cluster state information for the status API.
+// *replication.ClusterManager implements this interface.
+type ClusterInfoProvider interface {
+	NodeID() string
+	IsLeader() bool
+	LeaderID() string
+}
+
+// ---------------------------------------------------------------------------
 // Server
 // ---------------------------------------------------------------------------
 
@@ -48,10 +60,11 @@ type WriteForwarder interface {
 // Write operations are then transparently forwarded to the leader if this
 // node is a follower. Read operations always execute locally.
 type Server struct {
-	db     *graphdb.DB
-	router WriteForwarder // nil in standalone mode
-	mux    *http.ServeMux
-	uiDir  string // path to ui/dist (empty = API-only mode)
+	db      *graphdb.DB
+	router  WriteForwarder      // nil in standalone mode
+	cluster ClusterInfoProvider // nil in standalone mode
+	mux     *http.ServeMux
+	uiDir   string // path to ui/dist (empty = API-only mode)
 
 	// Prepared statement pool: stmtID → *graphdb.PreparedQuery
 	stmts   map[string]*graphdb.PreparedQuery
@@ -75,6 +88,11 @@ func New(db *graphdb.DB, uiDir string) *Server {
 // to the leader. Call this after cluster initialization.
 func (s *Server) SetRouter(r WriteForwarder) {
 	s.router = r
+}
+
+// SetCluster sets the cluster info provider for the /api/cluster endpoint.
+func (s *Server) SetCluster(c ClusterInfoProvider) {
+	s.cluster = c
 }
 
 // ServeHTTP implements http.Handler with CORS headers.
@@ -122,8 +140,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/edges/cursor", s.handleListEdgesCursor)
 	s.mux.HandleFunc("DELETE /api/edges/{id}", s.handleDeleteEdge)
 
-	// Cluster write forwarding — receives forwarded writes from follower routers.
+	// Cluster
 	s.mux.HandleFunc("POST /api/write", s.handleForwardedWrite)
+	s.mux.HandleFunc("GET /api/cluster", s.handleClusterStatus)
 
 	// Metrics & Observability
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
@@ -864,6 +883,36 @@ func (s *Server) handleSlowQueries(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{
 		"queries": entries,
 		"count":   len(entries),
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Cluster Status
+// ---------------------------------------------------------------------------
+
+// handleClusterStatus returns the current cluster state of this node.
+// In standalone mode (no cluster configured), returns mode=standalone.
+// In cluster mode, returns the node ID, role, leader ID, and DB role.
+func (s *Server) handleClusterStatus(w http.ResponseWriter, _ *http.Request) {
+	if s.cluster == nil {
+		writeJSON(w, 200, map[string]any{
+			"mode": "standalone",
+			"role": s.db.Role(),
+		})
+		return
+	}
+
+	role := "follower"
+	if s.cluster.IsLeader() {
+		role = "leader"
+	}
+
+	writeJSON(w, 200, map[string]any{
+		"mode":      "cluster",
+		"node_id":   s.cluster.NodeID(),
+		"role":      role,
+		"leader_id": s.cluster.LeaderID(),
+		"db_role":   s.db.Role(),
 	})
 }
 
