@@ -285,6 +285,12 @@ func (db *DB) isClosed() bool {
 	return db.closed.Load()
 }
 
+// IsClosed returns true if the database has been closed.
+// Used by the health check endpoint to determine if the node is ready.
+func (db *DB) IsClosed() bool {
+	return db.closed.Load()
+}
+
 // shardFor returns the shard responsible for the given node ID.
 // Uses consistent hash-based partitioning.
 func (db *DB) shardFor(id NodeID) *shard {

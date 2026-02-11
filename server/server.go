@@ -140,9 +140,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/edges/cursor", s.handleListEdgesCursor)
 	s.mux.HandleFunc("DELETE /api/edges/{id}", s.handleDeleteEdge)
 
-	// Cluster
+	// Cluster & Health
 	s.mux.HandleFunc("POST /api/write", s.handleForwardedWrite)
 	s.mux.HandleFunc("GET /api/cluster", s.handleClusterStatus)
+	s.mux.HandleFunc("GET /api/health", s.handleHealth)
 
 	// Metrics & Observability
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
@@ -914,6 +915,78 @@ func (s *Server) handleClusterStatus(w http.ResponseWriter, _ *http.Request) {
 		"leader_id": s.cluster.LeaderID(),
 		"db_role":   s.db.Role(),
 	})
+}
+
+// ---------------------------------------------------------------------------
+// Health / Readiness
+// ---------------------------------------------------------------------------
+
+// handleHealth returns a health check response suitable for load balancers.
+//
+// Response codes:
+//   - 200 OK: node is healthy and ready to serve traffic
+//   - 503 Service Unavailable: node is not ready (DB closed, no leader yet)
+//
+// The response body includes the node role, which load balancers can use
+// for intelligent routing:
+//   - "leader":     accepts both reads and writes
+//   - "follower":   accepts reads, writes forwarded to leader
+//   - "standalone": accepts both reads and writes (no cluster)
+//
+// Load balancer configuration example (HAProxy):
+//
+//	backend graphdb_write
+//	  option httpchk GET /api/health
+//	  http-check expect string "leader"
+//
+//	backend graphdb_read
+//	  option httpchk GET /api/health
+//	  http-check expect rstatus 200
+func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	// Check if DB is open and operational.
+	if s.db.IsClosed() {
+		writeJSON(w, 503, map[string]any{
+			"status": "unavailable",
+			"reason": "database is closed",
+		})
+		return
+	}
+
+	role := "standalone"
+	nodeID := ""
+	leaderID := ""
+
+	if s.cluster != nil {
+		nodeID = s.cluster.NodeID()
+		leaderID = s.cluster.LeaderID()
+		if s.cluster.IsLeader() {
+			role = "leader"
+		} else {
+			role = "follower"
+		}
+
+		// If no leader is known yet, the cluster is still initializing.
+		if leaderID == "" {
+			writeJSON(w, 503, map[string]any{
+				"status":  "unavailable",
+				"reason":  "no leader elected yet",
+				"node_id": nodeID,
+				"role":    role,
+			})
+			return
+		}
+	}
+
+	resp := map[string]any{
+		"status": "ok",
+		"role":   role,
+	}
+	if nodeID != "" {
+		resp["node_id"] = nodeID
+		resp["leader_id"] = leaderID
+	}
+
+	writeJSON(w, 200, resp)
 }
 
 // ---------------------------------------------------------------------------
