@@ -10,3 +10,6 @@ ui/dist/
 
 # OS
 .DS_Store
+data1/
+data2/
+data3/
