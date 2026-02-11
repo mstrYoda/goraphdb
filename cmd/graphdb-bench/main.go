@@ -29,15 +29,16 @@ import (
 
 // BenchConfig holds all CLI-driven configuration for the benchmark.
 type BenchConfig struct {
-	Targets   []string
-	Duration  time.Duration
-	Writers   int
-	Readers   int
-	SeedNodes int
-	SeedEdges int
-	Warmup    time.Duration
-	Cooldown  time.Duration
-	RepProbe  bool // whether to run replication lag probing
+	Targets    []string
+	Duration   time.Duration
+	Writers    int
+	Readers    int
+	SeedNodes  int
+	SeedEdges  int
+	Warmup     time.Duration
+	Cooldown   time.Duration
+	RepProbe   bool // whether to run replication lag probing
+	NoIndexes  bool // skip index creation to test unindexed performance
 }
 
 func main() {
@@ -51,6 +52,7 @@ func main() {
 		warmup     = flag.Duration("warmup", 5*time.Second, "Warmup duration before collecting stats")
 		cooldown   = flag.Duration("cooldown", 2*time.Second, "Cooldown duration after stopping writers")
 		noRepProbe = flag.Bool("no-rep-probe", false, "Disable replication lag probing")
+		noIndexes  = flag.Bool("no-indexes", false, "Skip index creation (test unindexed performance)")
 	)
 	flag.Parse()
 
@@ -67,8 +69,9 @@ func main() {
 		SeedNodes: *seedNodeCount,
 		SeedEdges: *seedEdgeCount,
 		Warmup:    *warmup,
-		Cooldown:  *cooldown,
-		RepProbe:  !*noRepProbe,
+		Cooldown:   *cooldown,
+		RepProbe:   !*noRepProbe,
+		NoIndexes:  *noIndexes,
 	}
 
 	printBanner(cfg)
@@ -84,7 +87,21 @@ func main() {
 	fmt.Println("OK")
 
 	// -----------------------------------------------------------------------
-	// Step 2: Seed data.
+	// Step 2: Create indexes (unless -no-indexes).
+	// -----------------------------------------------------------------------
+	if !cfg.NoIndexes {
+		fmt.Print("Creating indexes (name, city)... ")
+		if err := createIndexes(cfg.Targets[0]); err != nil {
+			fmt.Fprintf(os.Stderr, "\nERROR creating indexes: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("OK")
+	} else {
+		fmt.Println("Skipping index creation (-no-indexes)")
+	}
+
+	// -----------------------------------------------------------------------
+	// Step 3: Seed data.
 	// -----------------------------------------------------------------------
 	registry := &NodeRegistry{}
 	fmt.Printf("Seeding %d nodes + %d edges... ", cfg.SeedNodes, cfg.SeedEdges)
@@ -104,7 +121,7 @@ func main() {
 	fmt.Printf("OK (%d nodes registered)\n", registry.Len())
 
 	// -----------------------------------------------------------------------
-	// Step 3: Warmup phase — run workers but don't collect stats.
+	// Step 4: Warmup phase — run workers but don't collect stats.
 	// -----------------------------------------------------------------------
 	collector := NewCollector(100_000)
 	collector.Start()
@@ -141,7 +158,7 @@ func main() {
 	}
 
 	// -----------------------------------------------------------------------
-	// Step 4: Steady-state benchmark.
+	// Step 5: Steady-state benchmark.
 	// -----------------------------------------------------------------------
 	// Reset collector for clean stats (create a new one).
 	collector.Stop()
@@ -211,7 +228,7 @@ func main() {
 	elapsed := time.Since(benchStart)
 
 	// -----------------------------------------------------------------------
-	// Step 5: Cooldown.
+	// Step 6: Cooldown.
 	// -----------------------------------------------------------------------
 	if cfg.Cooldown > 0 {
 		fmt.Printf("\n\nCooling down for %s...", cfg.Cooldown)
@@ -220,7 +237,7 @@ func main() {
 	}
 
 	// -----------------------------------------------------------------------
-	// Step 6: Report.
+	// Step 7: Report.
 	// -----------------------------------------------------------------------
 	collector.Stop()
 	collector.PrintReport(elapsed, cfg)
@@ -239,5 +256,10 @@ func printBanner(cfg BenchConfig) {
 	fmt.Printf("  Seed     : %d nodes, %d edges\n", cfg.SeedNodes, cfg.SeedEdges)
 	fmt.Printf("  Warmup   : %s\n", cfg.Warmup)
 	fmt.Printf("  RepProbe : %v\n", cfg.RepProbe)
+	if cfg.NoIndexes {
+		fmt.Printf("  Indexes  : disabled\n")
+	} else {
+		fmt.Printf("  Indexes  : name, city\n")
+	}
 	fmt.Println()
 }

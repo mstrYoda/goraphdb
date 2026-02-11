@@ -321,13 +321,20 @@ func runReadWorker(
 		target := targets.Next()
 
 		switch {
-		case roll < 30:
+		case roll < 25:
+			// 25% — Point read by ID (REST)
 			doPointRead(ctx, target, rng, registry, collector)
-		case roll < 55:
+		case roll < 45:
+			// 20% — Indexed property lookup (Cypher + index)
+			doIndexedLookup(ctx, target, rng, collector)
+		case roll < 60:
+			// 15% — Label scan (Cypher)
 			doLabelScan(ctx, target, collector)
 		case roll < 80:
+			// 20% — 1-hop traversal (REST neighborhood)
 			doTraversal(ctx, target, rng, registry, collector)
 		default:
+			// 20% — Full neighborhood fetch (REST)
 			doNeighborhood(ctx, target, rng, registry, collector)
 		}
 	}
@@ -373,7 +380,14 @@ func doLabelScan(
 	collector.Record(Sample{Op: OpLabelScan, Duration: dur, IsError: isErr})
 }
 
-// doTraversal runs a 1-hop traversal from a random node.
+// doTraversal runs a 1-hop traversal from a random node using the REST API.
+//
+// NOTE: We use GET /api/nodes/{id}/neighborhood instead of Cypher
+// `MATCH (a)-[r]->(b) WHERE id(a) = N` because the Cypher engine does NOT
+// have an optimization path for `WHERE id(a) = N` in single-hop patterns.
+// Without the optimization, it does a full edge scan which is O(edges) and
+// triggers slow query warnings as the dataset grows.
+// The REST neighborhood endpoint does a direct O(1) node lookup + edge fetch.
 func doTraversal(
 	ctx context.Context,
 	target string,
@@ -386,10 +400,9 @@ func doTraversal(
 		return
 	}
 
-	query := fmt.Sprintf(`MATCH (a)-[r]->(b) WHERE id(a) = %d RETURN b.name, type(r) LIMIT 50`, id)
-
+	url := fmt.Sprintf("%s/api/nodes/%d/neighborhood", target, id)
 	start := time.Now()
-	resp, err := postJSON(target+"/api/cypher", map[string]string{"query": query})
+	resp, err := httpClient.Get(url)
 	dur := time.Since(start)
 	readAndClose(resp)
 
@@ -418,6 +431,60 @@ func doNeighborhood(
 
 	isErr := err != nil || (resp != nil && resp.StatusCode >= 400)
 	collector.Record(Sample{Op: OpNeighborhood, Duration: dur, IsError: isErr})
+}
+
+// ---------------------------------------------------------------------------
+// Indexed property lookup — uses Cypher with indexed property equality.
+// ---------------------------------------------------------------------------
+
+// doIndexedLookup queries nodes by an indexed property (name or city).
+func doIndexedLookup(
+	ctx context.Context,
+	target string,
+	rng *rand.Rand,
+	collector *Collector,
+) {
+	var query string
+	if rng.Intn(2) == 0 {
+		// Lookup by name (exact match via property index).
+		query = fmt.Sprintf(`MATCH (n {name: "seed_%d"}) RETURN n`, rng.Intn(200))
+	} else {
+		// Lookup by city (exact match via property index).
+		city := cities[rng.Intn(len(cities))]
+		query = fmt.Sprintf(`MATCH (n {city: "%s"}) RETURN n LIMIT 20`, city)
+	}
+
+	start := time.Now()
+	resp, err := postJSON(target+"/api/cypher", map[string]string{"query": query})
+	dur := time.Since(start)
+	readAndClose(resp)
+
+	isErr := err != nil || (resp != nil && resp.StatusCode >= 400)
+	collector.Record(Sample{Op: OpIndexedLookup, Duration: dur, IsError: isErr})
+}
+
+// ---------------------------------------------------------------------------
+// Index setup — creates secondary indexes on commonly queried properties.
+// ---------------------------------------------------------------------------
+
+func createIndexes(target string) error {
+	indexes := []string{"name", "city"}
+	for _, prop := range indexes {
+		resp, err := postJSON(target+"/api/indexes", map[string]string{
+			"property": prop,
+		})
+		if err != nil {
+			return fmt.Errorf("create index %q: %w", prop, err)
+		}
+		// 409 Conflict means index already exists — that's fine.
+		if resp.StatusCode >= 400 && resp.StatusCode != 409 {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			return fmt.Errorf("create index %q: HTTP %d: %s", prop, resp.StatusCode, string(body))
+		}
+		readAndClose(resp)
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------

@@ -23,9 +23,10 @@ const (
 	OpPointRead   OpType = "PointRead"
 	OpLabelScan   OpType = "LabelScan"
 	OpTraversal   OpType = "Traversal"
-	OpNeighborhood OpType = "Neighborhood"
-	OpCanaryWrite OpType = "CanaryWrite"
-	OpCanaryRead  OpType = "CanaryRead"
+	OpNeighborhood  OpType = "Neighborhood"
+	OpIndexedLookup OpType = "IndexedLookup"
+	OpCanaryWrite   OpType = "CanaryWrite"
+	OpCanaryRead    OpType = "CanaryRead"
 )
 
 // ---------------------------------------------------------------------------
@@ -139,7 +140,7 @@ func NewCollector(bufSize int) *Collector {
 	// Pre-create histograms for known op types.
 	for _, op := range []OpType{
 		OpCreateNode, OpCreateEdge, OpMergeNode, OpUpdateNode,
-		OpPointRead, OpLabelScan, OpTraversal, OpNeighborhood,
+		OpPointRead, OpLabelScan, OpTraversal, OpNeighborhood, OpIndexedLookup,
 	} {
 		c.histograms[op] = &Histogram{}
 	}
@@ -199,7 +200,7 @@ func (c *Collector) ProgressLine(elapsed time.Duration) string {
 	var writeP99, readP99 time.Duration
 
 	writeTypes := []OpType{OpCreateNode, OpCreateEdge, OpMergeNode, OpUpdateNode}
-	readTypes := []OpType{OpPointRead, OpLabelScan, OpTraversal, OpNeighborhood}
+	readTypes := []OpType{OpPointRead, OpLabelScan, OpTraversal, OpNeighborhood, OpIndexedLookup}
 
 	for _, op := range writeTypes {
 		if h, ok := c.histograms[op]; ok {
