@@ -925,23 +925,32 @@ func (s *Server) handleClusterStatus(w http.ResponseWriter, _ *http.Request) {
 //
 // Response codes:
 //   - 200 OK: node is healthy and ready to serve traffic
-//   - 503 Service Unavailable: node is not ready (DB closed, no leader yet)
+//   - 503 Service Unavailable: node is completely unavailable (DB closed)
 //
-// The response body includes the node role, which load balancers can use
-// for intelligent routing:
-//   - "leader":     accepts both reads and writes
-//   - "follower":   accepts reads, writes forwarded to leader
-//   - "standalone": accepts both reads and writes (no cluster)
+// The response body includes the node status and role for intelligent routing:
 //
-// Load balancer configuration example (HAProxy):
+//   - status="ok"       — fully operational (reads + writes)
+//   - status="readonly" — reads work, writes unavailable (no leader / quorum lost)
+//   - role="leader"     — accepts both reads and writes
+//   - role="follower"   — accepts reads, forwards writes to leader
+//   - role="standalone" — accepts both reads and writes (no cluster)
 //
+// Load balancer configuration examples (HAProxy):
+//
+//	# Route writes only to the leader:
 //	backend graphdb_write
 //	  option httpchk GET /api/health
 //	  http-check expect string "leader"
 //
+//	# Route reads to any healthy node (including leaderless followers):
 //	backend graphdb_read
 //	  option httpchk GET /api/health
 //	  http-check expect rstatus 200
+//
+//	# Route reads only to fully-operational nodes:
+//	backend graphdb_read_strict
+//	  option httpchk GET /api/health
+//	  http-check expect string "\"status\":\"ok\""
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	// Check if DB is open and operational.
 	if s.db.IsClosed() {
@@ -955,6 +964,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	role := "standalone"
 	nodeID := ""
 	leaderID := ""
+	status := "ok"
+	readable := true
+	writable := true
 
 	if s.cluster != nil {
 		nodeID = s.cluster.NodeID()
@@ -965,24 +977,24 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 			role = "follower"
 		}
 
-		// If no leader is known yet, the cluster is still initializing.
+		// No leader means writes cannot be processed (no forwarding target),
+		// but reads still work from local data.
 		if leaderID == "" {
-			writeJSON(w, 503, map[string]any{
-				"status":  "unavailable",
-				"reason":  "no leader elected yet",
-				"node_id": nodeID,
-				"role":    role,
-			})
-			return
+			status = "readonly"
+			writable = false
 		}
 	}
 
 	resp := map[string]any{
-		"status": "ok",
-		"role":   role,
+		"status":   status,
+		"role":     role,
+		"readable": readable,
+		"writable": writable,
 	}
 	if nodeID != "" {
 		resp["node_id"] = nodeID
+	}
+	if leaderID != "" {
 		resp["leader_id"] = leaderID
 	}
 
