@@ -67,12 +67,23 @@ import (
 // ---------------------------------------------------------------------------
 
 const (
-	walSegmentMaxSize = 64 * 1024 * 1024 // 64MB per segment file
-	walFilePattern    = "wal-%010d.log"  // segment filename format
-	walFrameOverhead  = 4 + 4            // frameLen(4) + crc32(4) = 8 bytes per entry
+	walSegmentMaxSize    = 64 * 1024 * 1024  // 64MB per segment file
+	walFilePattern       = "wal-%010d.log"   // segment filename format
+	walFrameOverhead     = 4 + 4             // frameLen(4) + crc32(4) = 8 bytes per entry
+	walGroupCommitPeriod = 2 * time.Millisecond // how often the background goroutine fsyncs
 )
 
 // WAL is the write-ahead log for replication.
+//
+// Group commit: Instead of fsyncing after every Append(), writes are buffered
+// in the OS page cache and a background goroutine fsyncs periodically
+// (every walGroupCommitPeriod). This batches multiple writes into a single
+// fsync call, dramatically improving throughput under concurrent writes.
+//
+// Since walAppend is called AFTER bbolt commit (which already fsyncs to its
+// own file), losing the last few ms of WAL entries on a crash only affects
+// replication — the data is already durable in bbolt. The follower will
+// request the missing entries when it reconnects.
 type WAL struct {
 	mu          sync.Mutex
 	dir         string        // directory containing WAL segment files
@@ -83,6 +94,11 @@ type WAL struct {
 	noSync      bool          // skip fsync for testing (unsafe for production)
 	log         *slog.Logger
 	closed      bool
+
+	// Group commit: background fsync goroutine.
+	dirty   atomic.Bool   // true when there are unflushed writes
+	stopCh  chan struct{} // signals the sync goroutine to stop
+	doneCh  chan struct{} // closed when the sync goroutine exits
 }
 
 // OpenWAL opens or creates a WAL in the given directory.
@@ -139,10 +155,18 @@ func OpenWAL(dir string, noSync bool, logger *slog.Logger) (*WAL, error) {
 		w.currentSize = info.Size()
 	}
 
+	// Start the group-commit background goroutine (only if fsync is enabled).
+	if !w.noSync {
+		w.stopCh = make(chan struct{})
+		w.doneCh = make(chan struct{})
+		go w.syncLoop()
+	}
+
 	logger.Info("WAL opened",
 		"dir", walDir,
 		"segment", w.currentSegN,
 		"next_lsn", w.nextLSN.Load(),
+		"group_commit", !w.noSync,
 	)
 
 	return w, nil
@@ -189,17 +213,12 @@ func (w *WAL) Append(op OpType, payload []byte) (uint64, error) {
 	copy(frame[4:4+len(entryData)], entryData)
 	binary.BigEndian.PutUint32(frame[4+len(entryData):], checksum)
 
-	// Write the frame.
+	// Write the frame to the OS page cache (no fsync here).
+	// The background syncLoop will fsync periodically (group commit).
 	if _, err := w.currentSeg.Write(frame); err != nil {
 		return 0, fmt.Errorf("graphdb: WAL: failed to write frame: %w", err)
 	}
-
-	// Fsync for durability (unless testing).
-	if !w.noSync {
-		if err := w.currentSeg.Sync(); err != nil {
-			return 0, fmt.Errorf("graphdb: WAL: fsync failed: %w", err)
-		}
-	}
+	w.dirty.Store(true) // signal the sync goroutine
 
 	w.currentSize += int64(len(frame))
 
@@ -225,6 +244,12 @@ func (w *WAL) LastLSN() uint64 {
 
 // Close flushes and closes the WAL.
 func (w *WAL) Close() error {
+	// Stop the background sync goroutine first.
+	if w.stopCh != nil {
+		close(w.stopCh)
+		<-w.doneCh // wait for it to finish
+	}
+
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -234,12 +259,43 @@ func (w *WAL) Close() error {
 	w.closed = true
 
 	if w.currentSeg != nil {
+		// Final fsync to flush any remaining dirty data.
 		if err := w.currentSeg.Sync(); err != nil {
 			return err
 		}
 		return w.currentSeg.Close()
 	}
 	return nil
+}
+
+// syncLoop is the group commit background goroutine. It periodically fsyncs
+// the WAL file to batch multiple writes into a single fsync call.
+//
+// This reduces fsync overhead from O(writes/sec) to O(1000/period) — with
+// a 2ms period, that's ~500 fsyncs/sec regardless of write concurrency.
+func (w *WAL) syncLoop() {
+	defer close(w.doneCh)
+	ticker := time.NewTicker(walGroupCommitPeriod)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-w.stopCh:
+			return
+		case <-ticker.C:
+			if !w.dirty.Load() {
+				continue
+			}
+			w.mu.Lock()
+			if w.currentSeg != nil && !w.closed {
+				if err := w.currentSeg.Sync(); err != nil {
+					w.log.Error("WAL: group commit fsync failed", "error", err)
+				}
+				w.dirty.Store(false)
+			}
+			w.mu.Unlock()
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
