@@ -247,8 +247,8 @@ type CreatePattern struct {
 // This provides upsert semantics and is typically used with unique constraints
 // to implement "get-or-create" patterns.
 type CypherMerge struct {
-	Pattern MergePattern   // the node pattern to match or create
-	Return  *ReturnClause  // optional RETURN clause
+	Pattern MergePattern  // the node pattern to match or create
+	Return  *ReturnClause // optional RETURN clause
 }
 
 // MergePattern describes a single node to be merged (matched or created).

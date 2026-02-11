@@ -20,24 +20,24 @@ import (
 type OpType uint8
 
 const (
-	OpAddNode              OpType = iota + 1 // single node creation
-	OpAddNodeBatch                           // batch node creation
-	OpUpdateNode                             // merge-update node properties
-	OpSetNodeProps                           // full-replace node properties
-	OpDeleteNode                             // node + connected edge deletion
-	OpAddEdge                                // single edge creation
-	OpAddEdgeBatch                           // batch edge creation
-	OpDeleteEdge                             // edge deletion
-	OpUpdateEdge                             // merge-update edge properties
-	OpAddNodeWithLabels                      // node creation with labels
-	OpAddLabel                               // add labels to existing node
-	OpRemoveLabel                            // remove labels from existing node
-	OpCreateIndex                            // create property index
-	OpDropIndex                              // drop property index
-	OpCreateCompositeIndex                   // create composite property index
-	OpDropCompositeIndex                     // drop composite property index
-	OpCreateUniqueConstraint                 // create unique constraint on (label, property)
-	OpDropUniqueConstraint                   // drop unique constraint
+	OpAddNode                OpType = iota + 1 // single node creation
+	OpAddNodeBatch                             // batch node creation
+	OpUpdateNode                               // merge-update node properties
+	OpSetNodeProps                             // full-replace node properties
+	OpDeleteNode                               // node + connected edge deletion
+	OpAddEdge                                  // single edge creation
+	OpAddEdgeBatch                             // batch edge creation
+	OpDeleteEdge                               // edge deletion
+	OpUpdateEdge                               // merge-update edge properties
+	OpAddNodeWithLabels                        // node creation with labels
+	OpAddLabel                                 // add labels to existing node
+	OpRemoveLabel                              // remove labels from existing node
+	OpCreateIndex                              // create property index
+	OpDropIndex                                // drop property index
+	OpCreateCompositeIndex                     // create composite property index
+	OpDropCompositeIndex                       // drop composite property index
+	OpCreateUniqueConstraint                   // create unique constraint on (label, property)
+	OpDropUniqueConstraint                     // drop unique constraint
 )
 
 // String returns a human-readable name for the operation type.
@@ -89,10 +89,10 @@ func (op OpType) String() string {
 // uniquely identifies each entry across the entire WAL history. Followers
 // track their applied LSN to request only new entries from the leader.
 type WALEntry struct {
-	LSN       uint64 `msgpack:"lsn"`       // monotonically increasing sequence number
-	Timestamp int64  `msgpack:"ts"`         // unix nanoseconds when the entry was created
-	Op        OpType `msgpack:"op"`         // mutation type
-	Payload   []byte `msgpack:"payload"`    // msgpack-encoded operation arguments
+	LSN       uint64 `msgpack:"lsn"`     // monotonically increasing sequence number
+	Timestamp int64  `msgpack:"ts"`      // unix nanoseconds when the entry was created
+	Op        OpType `msgpack:"op"`      // mutation type
+	Payload   []byte `msgpack:"payload"` // msgpack-encoded operation arguments
 }
 
 // ---------------------------------------------------------------------------

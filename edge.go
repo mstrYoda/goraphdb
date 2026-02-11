@@ -89,6 +89,9 @@ func (db *DB) AddEdge(from, to NodeID, label string, props Props) (EdgeID, error
 			return 0, fmt.Errorf("graphdb: failed to add edge: %w", err)
 		}
 		db.walAppend(OpAddEdge, WALAddEdge{ID: id, From: from, To: to, Label: label, Props: props})
+		if db.edgeBloom != nil {
+			db.edgeBloom.Add(from, to)
+		}
 		if db.metrics != nil {
 			db.metrics.EdgesCreated.Add(1)
 		}
@@ -135,6 +138,9 @@ func (db *DB) AddEdge(from, to NodeID, label string, props Props) (EdgeID, error
 	}
 
 	db.walAppend(OpAddEdge, WALAddEdge{ID: id, From: from, To: to, Label: label, Props: props})
+	if db.edgeBloom != nil {
+		db.edgeBloom.Add(from, to)
+	}
 	if db.metrics != nil {
 		db.metrics.EdgesCreated.Add(1)
 	}
@@ -211,6 +217,12 @@ func (db *DB) AddEdgeBatch(edges []Edge) ([]EdgeID, error) {
 			walEdges[i] = WALBatchEdge{ID: e.ID, From: e.From, To: e.To, Label: e.Label, Props: e.Props}
 		}
 		db.walAppend(OpAddEdgeBatch, WALAddEdgeBatch{Edges: walEdges})
+		// Update bloom filter for all edges in the batch.
+		if db.edgeBloom != nil {
+			for _, e := range edges {
+				db.edgeBloom.Add(e.From, e.To)
+			}
+		}
 		return ids, nil
 	}
 
@@ -297,6 +309,13 @@ func (db *DB) AddEdgeBatch(edges []Edge) ([]EdgeID, error) {
 		walEdges[i] = WALBatchEdge{ID: e.ID, From: e.From, To: e.To, Label: e.Label, Props: e.Props}
 	}
 	db.walAppend(OpAddEdgeBatch, WALAddEdgeBatch{Edges: walEdges})
+
+	// Update bloom filter for all edges in the batch.
+	if db.edgeBloom != nil {
+		for _, e := range edges {
+			db.edgeBloom.Add(e.From, e.To)
+		}
+	}
 
 	return ids, nil
 }
@@ -562,7 +581,18 @@ func (db *DB) EdgeCount() uint64 {
 }
 
 // HasEdge checks if a direct edge exists between two nodes.
+// Uses the bloom filter for a fast "definitely not" check before disk I/O.
 func (db *DB) HasEdge(from, to NodeID) (bool, error) {
+	// Bloom filter fast path: if the filter says "not present",
+	// the edge definitely doesn't exist — skip disk I/O entirely.
+	if db.edgeBloom != nil && !db.edgeBloom.Test(from, to) {
+		if db.metrics != nil {
+			db.metrics.BloomNegatives.Add(1)
+		}
+		return false, nil
+	}
+
+	// Bloom filter said "maybe present" — confirm with disk I/O.
 	edges, err := db.getEdgesForNode(from, Outgoing)
 	if err != nil {
 		return false, err

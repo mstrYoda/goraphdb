@@ -38,6 +38,9 @@ type Metrics struct {
 	// Index counters
 	IndexLookups atomic.Uint64
 
+	// Bloom filter counters
+	BloomNegatives atomic.Uint64 // HasEdge() calls avoided by bloom filter (true negatives)
+
 	// Internal reference to DB for pulling live gauges
 	db *DB
 }
@@ -79,7 +82,8 @@ func (m *Metrics) Snapshot() map[string]any {
 		"nodes_deleted_total": m.NodesDeleted.Load(),
 		"edges_created_total": m.EdgesCreated.Load(),
 		"edges_deleted_total": m.EdgesDeleted.Load(),
-		"index_lookups_total": m.IndexLookups.Load(),
+		"index_lookups_total":     m.IndexLookups.Load(),
+		"bloom_negatives_total":   m.BloomNegatives.Load(),
 	}
 
 	// Pull live gauges from DB.
@@ -91,6 +95,11 @@ func (m *Metrics) Snapshot() map[string]any {
 		cs := m.db.cache.stats()
 		snap["query_cache_entries"] = cs.Entries
 		snap["query_cache_capacity"] = cs.Capacity
+
+		if m.db.edgeBloom != nil {
+			snap["bloom_filter_bits"] = m.db.edgeBloom.size
+			snap["bloom_filter_memory_bytes"] = uint64(len(m.db.edgeBloom.bits)) * 8
+		}
 	}
 
 	return snap
@@ -110,6 +119,7 @@ func (m *Metrics) WritePrometheus(w io.Writer) {
 	pCounter(w, "graphdb_edges_created_total", "Total edges created", m.EdgesCreated.Load())
 	pCounter(w, "graphdb_edges_deleted_total", "Total edges deleted", m.EdgesDeleted.Load())
 	pCounter(w, "graphdb_index_lookups_total", "Total index lookups", m.IndexLookups.Load())
+	pCounter(w, "graphdb_bloom_negatives_total", "HasEdge calls avoided by bloom filter", m.BloomNegatives.Load())
 
 	// Gauges (live values from DB)
 	if m.db != nil {

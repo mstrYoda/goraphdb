@@ -19,23 +19,24 @@ import (
 //   - Write operations (AddNode, AddEdge, etc.) are serialized per-shard by bbolt.
 //   - The closed flag is an atomic.Bool so reads never hold a mutex — no recursive lock issues.
 type DB struct {
-	opts             Options
-	dir              string
-	shards           []*shard
-	pool             *workerPool
-	cache            queryCache     // Cypher AST cache — avoids re-parsing identical queries
-	ncache           *nodeCache     // LRU hot-node cache — avoids repeated bbolt lookups
-	log              *slog.Logger   // structured logger for all operations
-	mu               sync.Mutex     // only used in Close() to prevent double-close
-	closed           atomic.Bool    // atomic flag — checked by every operation without locking
-	indexedProps       sync.Map     // map[string]bool — tracks which property names have secondary indexes
-	compositeIndexes   sync.Map     // map[string]compositeIndexDef — tracks composite indexes
-	uniqueConstraints  sync.Map     // map[string]UniqueConstraint — tracks unique constraints
-	metrics          *Metrics       // operational counters (Prometheus-compatible)
-	slowLog          *slowQueryLog  // ring buffer of recent slow queries
-	governor         *queryGovernor // enforces per-query resource limits (row cap, default timeout)
-	compactQuit      chan struct{}  // closed in Close() to stop background compaction goroutine
-	wal              *WAL           // write-ahead log for replication (nil if disabled)
+	opts              Options
+	dir               string
+	shards            []*shard
+	pool              *workerPool
+	cache             queryCache     // Cypher AST cache — avoids re-parsing identical queries
+	ncache            *nodeCache     // LRU hot-node cache — avoids repeated bbolt lookups
+	log               *slog.Logger   // structured logger for all operations
+	mu                sync.Mutex     // only used in Close() to prevent double-close
+	closed            atomic.Bool    // atomic flag — checked by every operation without locking
+	indexedProps      sync.Map       // map[string]bool — tracks which property names have secondary indexes
+	compositeIndexes  sync.Map       // map[string]compositeIndexDef — tracks composite indexes
+	uniqueConstraints sync.Map       // map[string]UniqueConstraint — tracks unique constraints
+	edgeBloom         *bloomFilter   // probabilistic edge-existence filter (avoids disk I/O for HasEdge)
+	metrics           *Metrics       // operational counters (Prometheus-compatible)
+	slowLog           *slowQueryLog  // ring buffer of recent slow queries
+	governor          *queryGovernor // enforces per-query resource limits (row cap, default timeout)
+	compactQuit       chan struct{}  // closed in Close() to stop background compaction goroutine
+	wal               *WAL           // write-ahead log for replication (nil if disabled)
 }
 
 // Open creates or opens a graph database at the given directory path.
@@ -86,6 +87,10 @@ func Open(dir string, opts Options) (*DB, error) {
 	db.discoverIndexes()
 	db.discoverCompositeIndexes()
 	db.discoverUniqueConstraints()
+
+	// Initialize bloom filter for fast HasEdge() checks.
+	// Scans adj_out bucket to populate the filter with all existing edges.
+	db.initBloomFilter()
 
 	db.metrics = newMetrics(db)
 	db.slowLog = newSlowQueryLog(100)
