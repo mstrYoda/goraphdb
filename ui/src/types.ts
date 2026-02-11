@@ -98,6 +98,49 @@ export interface SlowQueryResponse {
   count: number
 }
 
+// ---------------------------------------------------------------------------
+// Cluster types
+// ---------------------------------------------------------------------------
+
+export interface ClusterNodeInfo {
+  node_id: string
+  role: string
+  status: string
+  readable: boolean
+  writable: boolean
+  http_addr: string
+  grpc_addr?: string
+  raft_addr?: string
+  stats?: GraphStats
+  replication?: {
+    wal_last_lsn?: number
+    applied_lsn?: number
+  }
+  metrics?: MetricsSnapshot
+  reachable: boolean
+  error?: string
+}
+
+export interface ClusterNodesResponse {
+  mode: string
+  self: string
+  leader_id: string
+  nodes: ClusterNodeInfo[]
+}
+
+export interface ClusterStatusResponse {
+  mode: string
+  node_id?: string
+  role: string
+  leader_id?: string
+  db_role?: string
+  http_addr?: string
+  grpc_addr?: string
+  raft_addr?: string
+  wal_last_lsn?: number
+  applied_lsn?: number
+}
+
 // Cursor pagination responses
 export interface NodeCursorPage {
   nodes: CursorNode[]

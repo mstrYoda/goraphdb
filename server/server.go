@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -47,6 +48,15 @@ type ClusterInfoProvider interface {
 	NodeID() string
 	IsLeader() bool
 	LeaderID() string
+	HTTPAddr() string
+	GRPCAddr() string
+	RaftAddr() string
+	// PeerHTTPAddrs returns a map of nodeID → HTTP address for all known peers (including self).
+	PeerHTTPAddrs() map[string]string
+	// WALLastLSN returns the last WAL LSN on this node (meaningful for leaders).
+	WALLastLSN() uint64
+	// AppliedLSN returns the last applied LSN on this node (meaningful for followers).
+	AppliedLSN() uint64
 }
 
 // ---------------------------------------------------------------------------
@@ -143,6 +153,7 @@ func (s *Server) routes() {
 	// Cluster & Health
 	s.mux.HandleFunc("POST /api/write", s.handleForwardedWrite)
 	s.mux.HandleFunc("GET /api/cluster", s.handleClusterStatus)
+	s.mux.HandleFunc("GET /api/cluster/nodes", s.handleClusterNodes)
 	s.mux.HandleFunc("GET /api/health", s.handleHealth)
 
 	// Metrics & Observability
@@ -893,7 +904,7 @@ func (s *Server) handleSlowQueries(w http.ResponseWriter, r *http.Request) {
 
 // handleClusterStatus returns the current cluster state of this node.
 // In standalone mode (no cluster configured), returns mode=standalone.
-// In cluster mode, returns the node ID, role, leader ID, and DB role.
+// In cluster mode, returns the node ID, role, leader ID, replication state, and addresses.
 func (s *Server) handleClusterStatus(w http.ResponseWriter, _ *http.Request) {
 	if s.cluster == nil {
 		writeJSON(w, 200, map[string]any{
@@ -909,12 +920,242 @@ func (s *Server) handleClusterStatus(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	writeJSON(w, 200, map[string]any{
-		"mode":      "cluster",
-		"node_id":   s.cluster.NodeID(),
-		"role":      role,
-		"leader_id": s.cluster.LeaderID(),
-		"db_role":   s.db.Role(),
+		"mode":        "cluster",
+		"node_id":     s.cluster.NodeID(),
+		"role":        role,
+		"leader_id":   s.cluster.LeaderID(),
+		"db_role":     s.db.Role(),
+		"http_addr":   s.cluster.HTTPAddr(),
+		"grpc_addr":   s.cluster.GRPCAddr(),
+		"raft_addr":   s.cluster.RaftAddr(),
+		"wal_last_lsn": s.cluster.WALLastLSN(),
+		"applied_lsn":  s.cluster.AppliedLSN(),
 	})
+}
+
+// ---------------------------------------------------------------------------
+// Cluster Nodes Aggregator
+// ---------------------------------------------------------------------------
+
+// clusterNodeInfo is the per-node JSON returned by the aggregator endpoint.
+type clusterNodeInfo struct {
+	NodeID      string         `json:"node_id"`
+	Role        string         `json:"role"`
+	Status      string         `json:"status"`
+	Readable    bool           `json:"readable"`
+	Writable    bool           `json:"writable"`
+	HTTPAddr    string         `json:"http_addr"`
+	GRPCAddr    string         `json:"grpc_addr,omitempty"`
+	RaftAddr    string         `json:"raft_addr,omitempty"`
+	Stats       map[string]any `json:"stats,omitempty"`
+	Replication map[string]any `json:"replication,omitempty"`
+	Metrics     map[string]any `json:"metrics,omitempty"`
+	Reachable   bool           `json:"reachable"`
+	Error       string         `json:"error,omitempty"`
+}
+
+// handleClusterNodes aggregates health, stats, metrics, and replication info
+// from all known cluster peers. It proxies HTTP calls to each peer's API and
+// returns a combined response — so the UI only needs to talk to one node.
+//
+// In standalone mode, returns only this node's information.
+func (s *Server) handleClusterNodes(w http.ResponseWriter, r *http.Request) {
+	// Standalone mode — return just this node.
+	if s.cluster == nil {
+		stats, _ := s.db.Stats()
+		var metricsData map[string]any
+		if m := s.db.Metrics(); m != nil {
+			metricsData = m.Snapshot()
+		}
+		var statsData map[string]any
+		if stats != nil {
+			statsData = map[string]any{
+				"node_count":      stats.NodeCount,
+				"edge_count":      stats.EdgeCount,
+				"shard_count":     stats.ShardCount,
+				"disk_size_bytes": stats.DiskSizeBytes,
+			}
+		}
+		node := clusterNodeInfo{
+			NodeID:    "standalone",
+			Role:      "standalone",
+			Status:    "ok",
+			Readable:  true,
+			Writable:  true,
+			Stats:     statsData,
+			Metrics:   metricsData,
+			Reachable: true,
+		}
+		writeJSON(w, 200, map[string]any{
+			"mode":      "standalone",
+			"self":      "standalone",
+			"leader_id": "",
+			"nodes":     []clusterNodeInfo{node},
+		})
+		return
+	}
+
+	// Cluster mode — aggregate from all peers.
+	selfID := s.cluster.NodeID()
+	leaderID := s.cluster.LeaderID()
+	peerAddrs := s.cluster.PeerHTTPAddrs()
+
+	// Use a short timeout for peer requests.
+	httpClient := &http.Client{Timeout: 3 * time.Second}
+
+	type result struct {
+		nodeID string
+		info   clusterNodeInfo
+	}
+
+	var wg sync.WaitGroup
+	results := make(chan result, len(peerAddrs))
+
+	for nodeID, httpAddr := range peerAddrs {
+		wg.Add(1)
+		go func(nid, addr string) {
+			defer wg.Done()
+			info := s.fetchPeerInfo(r.Context(), httpClient, nid, addr, leaderID)
+			results <- result{nodeID: nid, info: info}
+		}(nodeID, httpAddr)
+	}
+
+	wg.Wait()
+	close(results)
+
+	nodes := make([]clusterNodeInfo, 0, len(peerAddrs))
+	for res := range results {
+		nodes = append(nodes, res.info)
+	}
+
+	// Sort nodes: leader first, then by node ID.
+	sortClusterNodes(nodes, leaderID)
+
+	writeJSON(w, 200, map[string]any{
+		"mode":      "cluster",
+		"self":      selfID,
+		"leader_id": leaderID,
+		"nodes":     nodes,
+	})
+}
+
+// fetchPeerInfo fetches health, stats, and metrics from a single peer node.
+func (s *Server) fetchPeerInfo(ctx context.Context, client *http.Client, nodeID, httpAddr, leaderID string) clusterNodeInfo {
+	info := clusterNodeInfo{
+		NodeID:   nodeID,
+		HTTPAddr: httpAddr,
+	}
+
+	if httpAddr == "" {
+		info.Status = "unreachable"
+		info.Error = "no HTTP address configured"
+		return info
+	}
+
+	// Normalize HTTP address.
+	base := httpAddr
+	if !strings.HasPrefix(base, "http://") && !strings.HasPrefix(base, "https://") {
+		base = "http://" + base
+	}
+
+	// Fetch health.
+	healthData, err := s.fetchPeerJSON(ctx, client, base+"/api/health")
+	if err != nil {
+		info.Status = "unreachable"
+		info.Reachable = false
+		info.Error = err.Error()
+		return info
+	}
+	info.Reachable = true
+
+	// Parse health response.
+	if status, ok := healthData["status"].(string); ok {
+		info.Status = status
+	}
+	if role, ok := healthData["role"].(string); ok {
+		info.Role = role
+	}
+	if readable, ok := healthData["readable"].(bool); ok {
+		info.Readable = readable
+	}
+	if writable, ok := healthData["writable"].(bool); ok {
+		info.Writable = writable
+	}
+
+	// Fetch cluster status (for replication info and addresses).
+	clusterData, err := s.fetchPeerJSON(ctx, client, base+"/api/cluster")
+	if err == nil {
+		repl := make(map[string]any)
+		if walLSN, ok := clusterData["wal_last_lsn"]; ok {
+			repl["wal_last_lsn"] = walLSN
+		}
+		if appliedLSN, ok := clusterData["applied_lsn"]; ok {
+			repl["applied_lsn"] = appliedLSN
+		}
+		info.Replication = repl
+
+		if grpc, ok := clusterData["grpc_addr"].(string); ok {
+			info.GRPCAddr = grpc
+		}
+		if raft, ok := clusterData["raft_addr"].(string); ok {
+			info.RaftAddr = raft
+		}
+	}
+
+	// Fetch stats.
+	statsData, err := s.fetchPeerJSON(ctx, client, base+"/api/stats")
+	if err == nil {
+		info.Stats = statsData
+	}
+
+	// Fetch metrics.
+	metricsData, err := s.fetchPeerJSON(ctx, client, base+"/api/metrics")
+	if err == nil {
+		info.Metrics = metricsData
+	}
+
+	return info
+}
+
+// fetchPeerJSON makes a GET request to a peer and returns the decoded JSON body.
+func (s *Server) fetchPeerJSON(ctx context.Context, client *http.Client, url string) (map[string]any, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1MB limit
+	if err != nil {
+		return nil, err
+	}
+
+	var data map[string]any
+	if err := json.Unmarshal(body, &data); err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+// sortClusterNodes sorts cluster nodes: leader first, then alphabetically by node ID.
+func sortClusterNodes(nodes []clusterNodeInfo, leaderID string) {
+	for i := 0; i < len(nodes); i++ {
+		for j := i + 1; j < len(nodes); j++ {
+			swap := false
+			if nodes[j].NodeID == leaderID && nodes[i].NodeID != leaderID {
+				swap = true
+			} else if nodes[i].NodeID != leaderID && nodes[j].NodeID != leaderID && nodes[i].NodeID > nodes[j].NodeID {
+				swap = true
+			}
+			if swap {
+				nodes[i], nodes[j] = nodes[j], nodes[i]
+			}
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------

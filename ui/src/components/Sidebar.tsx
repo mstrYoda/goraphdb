@@ -1,9 +1,10 @@
 import { NavLink } from 'react-router-dom'
-import { LayoutDashboard, Terminal, Database, Search, Activity, Gauge, AlertTriangle } from 'lucide-react'
+import { LayoutDashboard, Terminal, Database, Search, Activity, Gauge, AlertTriangle, Server } from 'lucide-react'
 
 const links = [
   { to: '/query', icon: Terminal, label: 'Query' },
   { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
+  { to: '/cluster', icon: Server, label: 'Cluster' },
   { to: '/metrics', icon: Gauge, label: 'Metrics' },
   { to: '/slow-queries', icon: AlertTriangle, label: 'Slow Queries' },
   { to: '/indexes', icon: Database, label: 'Indexes' },

@@ -6,6 +6,7 @@ import IndexesPage from './pages/IndexesPage'
 import ExplorerPage from './pages/ExplorerPage'
 import MetricsPage from './pages/MetricsPage'
 import SlowQueriesPage from './pages/SlowQueriesPage'
+import ClusterPage from './pages/ClusterPage'
 
 export default function App() {
   return (
@@ -18,6 +19,7 @@ export default function App() {
         <Route path="/slow-queries" element={<SlowQueriesPage />} />
         <Route path="/indexes" element={<IndexesPage />} />
         <Route path="/explorer" element={<ExplorerPage />} />
+        <Route path="/cluster" element={<ClusterPage />} />
       </Routes>
     </Layout>
   )

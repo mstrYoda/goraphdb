@@ -9,6 +9,8 @@ import type {
   SlowQueryResponse,
   NodeCursorPage,
   EdgeCursorPage,
+  ClusterNodesResponse,
+  ClusterStatusResponse,
 } from '../types'
 
 const BASE = '/api'
@@ -87,4 +89,8 @@ export const api = {
     fetchJSON<NodeCursorPage>(`/nodes/cursor?cursor=${cursor}&limit=${limit}`),
   listEdgesCursor: (cursor = 0, limit = 30) =>
     fetchJSON<EdgeCursorPage>(`/edges/cursor?cursor=${cursor}&limit=${limit}`),
+
+  // ── Cluster ──────────────────────────────────────────────────────────
+  getClusterStatus: () => fetchJSON<ClusterStatusResponse>('/cluster'),
+  getClusterNodes: () => fetchJSON<ClusterNodesResponse>('/cluster/nodes'),
 }

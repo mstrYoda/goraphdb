@@ -407,6 +407,34 @@ func (cm *ClusterManager) RaftAddr() string {
 	return cm.config.RaftBindAddr
 }
 
+// PeerHTTPAddrs returns a map of nodeID → HTTP address for all known peers (including self).
+func (cm *ClusterManager) PeerHTTPAddrs() map[string]string {
+	// Return a copy to avoid concurrent map access.
+	m := make(map[string]string, len(cm.peerHTTPAddrs))
+	for k, v := range cm.peerHTTPAddrs {
+		m[k] = v
+	}
+	return m
+}
+
+// WALLastLSN returns the last WAL LSN on this node.
+// This is meaningful for leaders (shows how far the WAL has progressed).
+func (cm *ClusterManager) WALLastLSN() uint64 {
+	if w := cm.db.WAL(); w != nil {
+		return w.LastLSN()
+	}
+	return 0
+}
+
+// AppliedLSN returns the last applied LSN on this node.
+// This is meaningful for followers (shows how far replication has progressed).
+func (cm *ClusterManager) AppliedLSN() uint64 {
+	if cm.applier != nil {
+		return cm.applier.AppliedLSN()
+	}
+	return 0
+}
+
 // Close shuts down the cluster manager, stopping the replication client,
 // gRPC server, and Raft election.
 func (cm *ClusterManager) Close() error {

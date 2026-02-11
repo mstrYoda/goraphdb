@@ -1,20 +1,22 @@
 import { useState, useEffect } from 'react'
-import { CircleDot, GitBranch, HardDrive, Layers, Database } from 'lucide-react'
+import { CircleDot, GitBranch, HardDrive, Layers, Database, Crown, Users, Server, WifiOff } from 'lucide-react'
 import StatsCard from '../components/StatsCard'
 import { api } from '../api/client'
-import type { GraphStats } from '../types'
+import type { GraphStats, ClusterStatusResponse } from '../types'
 
 export default function Dashboard() {
   const [stats, setStats] = useState<GraphStats | null>(null)
   const [indexes, setIndexes] = useState<string[]>([])
+  const [cluster, setCluster] = useState<ClusterStatusResponse | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    Promise.all([api.getStats(), api.listIndexes()])
-      .then(([s, idx]) => {
+    Promise.all([api.getStats(), api.listIndexes(), api.getClusterStatus()])
+      .then(([s, idx, cl]) => {
         setStats(s)
         setIndexes(idx.indexes ?? [])
+        setCluster(cl)
       })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false))
@@ -41,6 +43,63 @@ export default function Dashboard() {
   return (
     <div>
       <h1 className="text-2xl font-bold text-white mb-6">Dashboard</h1>
+
+      {/* Cluster status banner */}
+      {cluster && (
+        <div className="mb-6">
+          <a
+            href="/cluster"
+            className={`flex items-center gap-3 px-4 py-3 rounded-xl border transition-colors hover:border-blue-500/30 ${
+              cluster.mode === 'cluster'
+                ? cluster.role === 'leader'
+                  ? 'bg-amber-500/5 border-amber-500/20'
+                  : 'bg-blue-500/5 border-blue-500/20'
+                : 'bg-slate-900 border-slate-800'
+            }`}
+          >
+            {cluster.mode === 'standalone' ? (
+              <>
+                <Server className="w-4 h-4 text-purple-400" />
+                <span className="text-sm text-slate-400">Standalone Mode</span>
+              </>
+            ) : (
+              <>
+                {cluster.role === 'leader' ? (
+                  <Crown className="w-4 h-4 text-amber-400" />
+                ) : (
+                  <Users className="w-4 h-4 text-blue-400" />
+                )}
+                <span className="text-sm text-white font-medium">
+                  {cluster.node_id}
+                </span>
+                <span
+                  className={`px-2 py-0.5 text-[10px] font-medium rounded-full border ${
+                    cluster.role === 'leader'
+                      ? 'bg-amber-500/15 text-amber-400 border-amber-500/30'
+                      : 'bg-blue-500/15 text-blue-400 border-blue-500/30'
+                  }`}
+                >
+                  {cluster.role?.toUpperCase()}
+                </span>
+                {cluster.leader_id && cluster.role !== 'leader' && (
+                  <span className="text-xs text-slate-500">
+                    Leader: <span className="text-slate-400">{cluster.leader_id}</span>
+                  </span>
+                )}
+                {!cluster.leader_id && cluster.mode === 'cluster' && (
+                  <span className="flex items-center gap-1 text-xs text-amber-400">
+                    <WifiOff className="w-3 h-3" />
+                    No leader elected
+                  </span>
+                )}
+                <span className="ml-auto text-[10px] text-slate-600">
+                  View cluster →
+                </span>
+              </>
+            )}
+          </a>
+        </div>
+      )}
 
       {/* Stats cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 mb-8">
