@@ -106,6 +106,13 @@ func main() {
 
 	srv := server.New(db, *uiDir)
 
+	// Wire the cluster router into the HTTP server for transparent
+	// write forwarding. Followers will forward writes to the leader
+	// via the Router; the leader executes them locally.
+	if cluster != nil {
+		srv.SetRouter(cluster.Router())
+	}
+
 	fmt.Println("╔══════════════════════════════════════╗")
 	fmt.Println("║       GraphDB Management UI          ║")
 	fmt.Println("╚══════════════════════════════════════╝")

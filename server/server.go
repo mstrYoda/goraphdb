@@ -2,9 +2,11 @@
 package server
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -18,15 +20,38 @@ import (
 )
 
 // ---------------------------------------------------------------------------
+// Write Forwarding Interface
+// ---------------------------------------------------------------------------
+
+// WriteForwarder abstracts cluster-aware write operations.
+// In cluster mode, *replication.Router implements this interface and
+// transparently forwards writes to the leader when this node is a follower.
+// In standalone mode, this field is nil and the server writes to the local DB.
+type WriteForwarder interface {
+	AddNode(props graphdb.Props) (graphdb.NodeID, error)
+	AddEdge(from, to graphdb.NodeID, label string, props graphdb.Props) (graphdb.EdgeID, error)
+	DeleteNode(id graphdb.NodeID) error
+	DeleteEdge(id graphdb.EdgeID) error
+	UpdateNode(id graphdb.NodeID, props graphdb.Props) error
+	UpdateEdge(id graphdb.EdgeID, props graphdb.Props) error
+	Query(ctx context.Context, query string) (*graphdb.CypherResult, error)
+}
+
+// ---------------------------------------------------------------------------
 // Server
 // ---------------------------------------------------------------------------
 
 // Server wraps a graphdb.DB and exposes an HTTP/JSON API.
 // It also serves the React SPA static files when uiDir is set.
+//
+// In cluster mode, a WriteForwarder (the Router) is set via SetRouter().
+// Write operations are then transparently forwarded to the leader if this
+// node is a follower. Read operations always execute locally.
 type Server struct {
-	db    *graphdb.DB
-	mux   *http.ServeMux
-	uiDir string // path to ui/dist (empty = API-only mode)
+	db     *graphdb.DB
+	router WriteForwarder // nil in standalone mode
+	mux    *http.ServeMux
+	uiDir  string // path to ui/dist (empty = API-only mode)
 
 	// Prepared statement pool: stmtID → *graphdb.PreparedQuery
 	stmts   map[string]*graphdb.PreparedQuery
@@ -43,6 +68,13 @@ func New(db *graphdb.DB, uiDir string) *Server {
 	s.mux = http.NewServeMux()
 	s.routes()
 	return s
+}
+
+// SetRouter sets the cluster-aware write forwarder.
+// When set, write operations on follower nodes are transparently forwarded
+// to the leader. Call this after cluster initialization.
+func (s *Server) SetRouter(r WriteForwarder) {
+	s.router = r
 }
 
 // ServeHTTP implements http.Handler with CORS headers.
@@ -89,6 +121,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/edges", s.handleCreateEdge)
 	s.mux.HandleFunc("GET /api/edges/cursor", s.handleListEdgesCursor)
 	s.mux.HandleFunc("DELETE /api/edges/{id}", s.handleDeleteEdge)
+
+	// Cluster write forwarding — receives forwarded writes from follower routers.
+	s.mux.HandleFunc("POST /api/write", s.handleForwardedWrite)
 
 	// Metrics & Observability
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
@@ -244,8 +279,18 @@ func (s *Server) handleCypher(w http.ResponseWriter, r *http.Request) {
 	}
 
 	start := time.Now()
-	result, err := s.db.Cypher(r.Context(), req.Query)
+
+	// Use router if available — it transparently forwards write queries
+	// to the leader when this node is a follower.
+	var result *graphdb.CypherResult
+	var err error
+	if s.router != nil {
+		result, err = s.router.Query(r.Context(), req.Query)
+	} else {
+		result, err = s.db.Cypher(r.Context(), req.Query)
+	}
 	elapsed := time.Since(start)
+
 	if err != nil {
 		writeError(w, 400, err.Error())
 		return
@@ -620,9 +665,20 @@ func (s *Server) handleCreateNode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid JSON body")
 		return
 	}
-	id, err := s.db.AddNode(req.Props)
+
+	var id graphdb.NodeID
+	var err error
+	if s.router != nil {
+		id, err = s.router.AddNode(req.Props)
+	} else {
+		id, err = s.db.AddNode(req.Props)
+	}
 	if err != nil {
-		writeError(w, 500, err.Error())
+		status := 500
+		if errors.Is(err, graphdb.ErrReadOnlyReplica) {
+			status = 503
+		}
+		writeError(w, status, err.Error())
 		return
 	}
 	writeJSON(w, 201, map[string]any{"id": id})
@@ -634,8 +690,18 @@ func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid node id")
 		return
 	}
-	if err := s.db.DeleteNode(graphdb.NodeID(id)); err != nil {
-		writeError(w, 500, err.Error())
+	var delErr error
+	if s.router != nil {
+		delErr = s.router.DeleteNode(graphdb.NodeID(id))
+	} else {
+		delErr = s.db.DeleteNode(graphdb.NodeID(id))
+	}
+	if delErr != nil {
+		status := 500
+		if errors.Is(delErr, graphdb.ErrReadOnlyReplica) {
+			status = 503
+		}
+		writeError(w, status, delErr.Error())
 		return
 	}
 	writeJSON(w, 200, map[string]string{"status": "deleted"})
@@ -660,9 +726,20 @@ func (s *Server) handleCreateEdge(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "label is required")
 		return
 	}
-	id, err := s.db.AddEdge(graphdb.NodeID(req.From), graphdb.NodeID(req.To), req.Label, req.Props)
+
+	var id graphdb.EdgeID
+	var err error
+	if s.router != nil {
+		id, err = s.router.AddEdge(graphdb.NodeID(req.From), graphdb.NodeID(req.To), req.Label, req.Props)
+	} else {
+		id, err = s.db.AddEdge(graphdb.NodeID(req.From), graphdb.NodeID(req.To), req.Label, req.Props)
+	}
 	if err != nil {
-		writeError(w, 500, err.Error())
+		status := 500
+		if errors.Is(err, graphdb.ErrReadOnlyReplica) {
+			status = 503
+		}
+		writeError(w, status, err.Error())
 		return
 	}
 	writeJSON(w, 201, map[string]any{"id": id})
@@ -674,8 +751,18 @@ func (s *Server) handleDeleteEdge(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid edge id")
 		return
 	}
-	if err := s.db.DeleteEdge(graphdb.EdgeID(id)); err != nil {
-		writeError(w, 500, err.Error())
+	var delErr error
+	if s.router != nil {
+		delErr = s.router.DeleteEdge(graphdb.EdgeID(id))
+	} else {
+		delErr = s.db.DeleteEdge(graphdb.EdgeID(id))
+	}
+	if delErr != nil {
+		status := 500
+		if errors.Is(delErr, graphdb.ErrReadOnlyReplica) {
+			status = 503
+		}
+		writeError(w, status, delErr.Error())
 		return
 	}
 	writeJSON(w, 200, map[string]string{"status": "deleted"})
@@ -778,6 +865,77 @@ func (s *Server) handleSlowQueries(w http.ResponseWriter, r *http.Request) {
 		"queries": entries,
 		"count":   len(entries),
 	})
+}
+
+// ---------------------------------------------------------------------------
+// Forwarded Write Operations (cluster mode)
+// ---------------------------------------------------------------------------
+
+// writeOpRequest is the JSON payload sent by a follower's Router when
+// forwarding a write operation to the leader's HTTP API.
+type writeOpRequest struct {
+	Op    string         `json:"op"`
+	ID    uint64         `json:"id,omitempty"`
+	From  uint64         `json:"from,omitempty"`
+	To    uint64         `json:"to,omitempty"`
+	Label string         `json:"label,omitempty"`
+	Props map[string]any `json:"props,omitempty"`
+}
+
+// writeOpResponse is the JSON response returned to the forwarding router.
+type writeOpResponse struct {
+	ID    uint64 `json:"id,omitempty"`
+	Error string `json:"error,omitempty"`
+}
+
+// handleForwardedWrite handles write operations forwarded from follower nodes.
+// This endpoint ALWAYS executes against the local DB — it is the "landing zone"
+// for writes that a follower's Router forwarded to the leader. This avoids
+// any re-routing loops since we bypass the Router entirely.
+func (s *Server) handleForwardedWrite(w http.ResponseWriter, r *http.Request) {
+	var req writeOpRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, 400, writeOpResponse{Error: "invalid JSON body"})
+		return
+	}
+
+	var respID uint64
+	var opErr error
+
+	switch req.Op {
+	case "AddNode":
+		var id graphdb.NodeID
+		id, opErr = s.db.AddNode(req.Props)
+		respID = uint64(id)
+
+	case "AddEdge":
+		var id graphdb.EdgeID
+		id, opErr = s.db.AddEdge(graphdb.NodeID(req.From), graphdb.NodeID(req.To), req.Label, req.Props)
+		respID = uint64(id)
+
+	case "DeleteNode":
+		opErr = s.db.DeleteNode(graphdb.NodeID(req.ID))
+
+	case "DeleteEdge":
+		opErr = s.db.DeleteEdge(graphdb.EdgeID(req.ID))
+
+	case "UpdateNode":
+		opErr = s.db.UpdateNode(graphdb.NodeID(req.ID), req.Props)
+
+	case "UpdateEdge":
+		opErr = s.db.UpdateEdge(graphdb.EdgeID(req.ID), req.Props)
+
+	default:
+		writeJSON(w, 400, writeOpResponse{Error: fmt.Sprintf("unknown write op: %s", req.Op)})
+		return
+	}
+
+	if opErr != nil {
+		writeJSON(w, 500, writeOpResponse{Error: opErr.Error()})
+		return
+	}
+
+	writeJSON(w, 200, writeOpResponse{ID: respID})
 }
 
 // ---------------------------------------------------------------------------
