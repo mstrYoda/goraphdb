@@ -33,6 +33,10 @@ A high-performance, embeddable graph database written in Go. Built on top of [bb
 - **Batch operations** — `AddNodeBatch` / `AddEdgeBatch` for bulk loading with single-fsync transactions
 - **Worker pool** — built-in goroutine pool for concurrent query execution
 - **Optional sharding** — hash-based partitioning across multiple bbolt files; edges co-located with source nodes for single-shard traversals
+- **Single-leader replication** — WAL-based log shipping over gRPC with automatic leader election (hashicorp/raft), follower Applier, and exponential backoff reconnect
+- **Transparent write forwarding** — followers automatically forward writes to the leader via HTTP; clients can connect to any node
+- **Health check endpoint** — `GET /api/health` returns role-aware status (leader/follower/standalone) for load balancer integration
+- **Cluster status endpoint** — `GET /api/cluster` exposes node ID, role, leader ID, and cluster topology
 - **Management UI** — built-in web console with a Cypher query editor, interactive graph visualization (cytoscape.js), index management, and a node/edge explorer
 
 ## Installation
@@ -625,8 +629,9 @@ GraphDB supports **single-leader replication** with automatic failover. One node
 | **Applier** | `applier.go` | Replays WAL entries on followers. Deterministic (uses leader's IDs), idempotent (skips duplicate LSNs), sequential. |
 | **Log Shipping** | `replication/server.go`, `replication/client.go` | gRPC server-streaming RPC. Leader streams WAL entries; follower applies them via the Applier. Auto-reconnect with exponential backoff. |
 | **Leader Election** | `replication/election.go` | hashicorp/raft integration for automatic leader election and failover. Raft is used only for election — data flows through the WAL pipeline. |
+| **Cluster Manager** | `replication/cluster.go` | Orchestrates Raft election, gRPC replication server/client, and role changes. Manages peer addresses and dynamic leader discovery. |
 | **Query Router** | `replication/router.go` | Routes reads locally, forwards writes to the leader via HTTP. Integrates with election for dynamic leader discovery. |
-| **Write Handler** | `replication/write_handler.go` | HTTP endpoint on the leader that accepts forwarded write operations from follower routers. |
+| **Health & Status** | `server/server.go` | `GET /api/health` (LB readiness) and `GET /api/cluster` (topology introspection) endpoints. |
 
 ### Configuration
 
@@ -675,6 +680,44 @@ When a follower's Router receives a write request:
 4. The leader executes it locally and returns the result
 5. The mutation flows back to followers via the WAL → gRPC pipeline
 
+### Running a Cluster
+
+Start a 3-node cluster using the `graphdb-ui` binary:
+
+```bash
+# Node 1 — will bootstrap as leader
+go run ./cmd/graphdb-ui/ -db ./data1 \
+  -node-id node1 -raft-addr 127.0.0.1:9001 -grpc-addr 127.0.0.1:9101 -http-addr 127.0.0.1:7474 \
+  -bootstrap \
+  -peers "node1@127.0.0.1:9001@127.0.0.1:9101@127.0.0.1:7474,node2@127.0.0.1:9002@127.0.0.1:9102@127.0.0.1:7475,node3@127.0.0.1:9003@127.0.0.1:9103@127.0.0.1:7476" \
+  -addr 127.0.0.1:7474
+
+# Node 2 — follower
+go run ./cmd/graphdb-ui/ -db ./data2 \
+  -node-id node2 -raft-addr 127.0.0.1:9002 -grpc-addr 127.0.0.1:9102 -http-addr 127.0.0.1:7475 \
+  -bootstrap \
+  -peers "node1@127.0.0.1:9001@127.0.0.1:9101@127.0.0.1:7474,node2@127.0.0.1:9002@127.0.0.1:9102@127.0.0.1:7475,node3@127.0.0.1:9003@127.0.0.1:9103@127.0.0.1:7476" \
+  -addr 127.0.0.1:7475
+
+# Node 3 — follower
+go run ./cmd/graphdb-ui/ -db ./data3 \
+  -node-id node3 -raft-addr 127.0.0.1:9003 -grpc-addr 127.0.0.1:9103 -http-addr 127.0.0.1:7476 \
+  -bootstrap \
+  -peers "node1@127.0.0.1:9001@127.0.0.1:9101@127.0.0.1:7474,node2@127.0.0.1:9002@127.0.0.1:9102@127.0.0.1:7475,node3@127.0.0.1:9003@127.0.0.1:9103@127.0.0.1:7476" \
+  -addr 127.0.0.1:7476
+```
+
+Peer format: `id@raft_addr@grpc_addr@http_addr` (comma-separated).
+
+Clients can connect to **any node** — reads are served locally, writes are transparently forwarded to the leader.
+
+### Observability Endpoints
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/api/health` | GET | Load balancer health probe. Returns `200` with `role` for routing. Returns `503` if DB is down or no leader elected. |
+| `/api/cluster` | GET | Cluster topology: node ID, role (leader/follower), current leader ID, DB role. |
+
 ## Architecture
 
 ```
@@ -685,7 +728,7 @@ When a follower's Router receives a write request:
 ├──────────────────────────────────────────────────────────────┤
 │                    HTTP / JSON API                            │
 │   /api/cypher · /api/nodes · /api/edges · /api/indexes       │
-│   /api/stats · /api/write (forwarded writes) · CORS          │
+│   /api/stats · /api/health · /api/cluster · /api/write       │
 ├──────────────────────────────────────────────────────────────┤
 │                     Replication Layer                         │
 │   WAL · gRPC Log Shipping · Applier · Raft Election          │
@@ -831,6 +874,16 @@ curl http://localhost:7474/metrics
 
 # Query cache stats
 curl http://localhost:7474/api/cache/stats
+
+# Health check (load balancer probe)
+curl http://localhost:7474/api/health
+# → {"status":"ok","role":"standalone"}               (standalone)
+# → {"status":"ok","role":"leader","node_id":"node1"}  (cluster leader)
+# → {"status":"ok","role":"follower","node_id":"node2"} (cluster follower)
+
+# Cluster status (topology introspection)
+curl http://localhost:7474/api/cluster
+# → {"mode":"cluster","node_id":"node1","role":"leader","leader_id":"node1","db_role":"leader"}
 ```
 
 ### Tech Stack
@@ -913,6 +966,8 @@ go test -bench=. -benchmem # benchmarks
 - [x] **Leader Election** — hashicorp/raft integration for automatic failover with dynamic role switching
 - [x] **Query Router** — read/write routing with HTTP write forwarding from followers to leader
 - [x] **Read-Only Replicas** — `writeGuard` on all 16 public write methods, `ErrReadOnlyReplica` sentinel
+- [x] **Health Check Endpoint** — `GET /api/health` with role-aware responses for load balancer routing
+- [x] **Cluster Status Endpoint** — `GET /api/cluster` for topology introspection (node ID, role, leader)
 - [ ] **Point-in-Time Recovery** — replay WAL from a backup snapshot to restore data to any past timestamp
 - [ ] **Change Data Capture (CDC)** — streaming API for external consumers to subscribe to graph mutations in real time
 - [ ] **Authentication & TLS** — user/password auth and encrypted connections for network-exposed deployments

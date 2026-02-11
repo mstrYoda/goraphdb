@@ -2,7 +2,7 @@
 
 ## Phase 1 — Foundation
 - [ ] **Hot Backup / Restore** — consistent snapshot using bbolt's built-in `WriteTo`, zero downtime
-- [ ] **Write-Ahead Log (WAL)** — log every mutation to a sequential file before applying to bbolt; enables replication and point-in-time recovery
+- [x] **Write-Ahead Log (WAL)** — append-only segmented log (64 MB segments, CRC32, msgpack) with WALReader tailing support; enables replication and point-in-time recovery
 - [ ] **Write Cypher** — `CREATE`, `SET`, `DELETE`, `MERGE` support in the Cypher engine
 - [x] **Prometheus Metrics** — atomic counters for queries, errors, cache hits/misses, node/edge CRUD, index lookups; `/metrics` Prometheus text endpoint + `/api/metrics` JSON endpoint
 - [x] **Binary Property Encoding** — replace JSON `encodeProps`/`decodeProps` with MessagePack or custom binary format (3–5× faster, 30–50% smaller)
@@ -12,7 +12,7 @@
 - [x] **Structured Logging** — integrate `slog` for all write operations, errors, and lifecycle events
 
 ## Phase 2 — Replication & Reliability
-- [ ] **Raft-based Replication** — each shard group runs a Raft consensus group (`hashicorp/raft`) with 1 leader + N followers for automatic failover
+- [x] **Raft-based Replication** — `hashicorp/raft` for leader election + WAL→gRPC log shipping for data replication; 1 leader + N followers with automatic failover, query router, and HTTP write forwarding
 - [ ] **Point-in-Time Recovery** — replay WAL from a backup snapshot to restore data to any past timestamp
 - [ ] **Change Data Capture (CDC)** — streaming API for external consumers to subscribe to graph mutations in real time
 - [ ] **Authentication & TLS** — user/password auth and encrypted connections for network-exposed deployments
@@ -25,7 +25,7 @@
 - [x] **Data Checksums** — CRC32 (Castagnoli) checksums on node properties and edge blobs, verified on read, with `VerifyIntegrity()` full scan
 
 ## Phase 3 — Distributed Cluster
-- [ ] **gRPC Inter-Node Protocol** — `ForwardQuery`, `ForwardWrite`, `TransferShard`, `Heartbeat` RPCs between cluster nodes
+- [x] **gRPC Inter-Node Protocol** — `StreamWAL` server-streaming RPC for WAL replication with auto-reconnect and exponential backoff
 - [ ] **Cluster Membership** — node discovery and health checking via gossip protocol (`hashicorp/memberlist`)
 - [ ] **Shard Placement Manager** — catalog of shard→node assignments, stored in its own Raft group
 - [ ] **Distributed Query Coordinator** — route Cypher queries to the correct node(s), scatter-gather for cross-shard queries, merge results
@@ -42,7 +42,7 @@
 ## Phase 4 — Production Hardening
 - [ ] **Range Indexes** — B+tree range scans for numerical/date properties (`WHERE n.age > 25` without full scan)
 - [ ] **Graph Partitioning** — smarter shard placement (METIS/Fennel) to minimize cross-shard edges
-- [ ] **Read Replicas** — route read-only Cypher to Raft followers, writes to leader
+- [x] **Read Replicas** — query router routes reads locally, forwards writes to leader via HTTP; `GET /api/health` exposes role for LB-based routing; `GET /api/cluster` for topology introspection
 - [ ] **Bloom Filters** — fast `HasEdge()` checks without touching disk
 - [ ] **Schema Constraints** — unique properties, required fields, edge cardinality rules
 - [x] **Query Timeout & Cancellation** — `CypherContext`/`CypherWithParamsContext` with `context.Context` propagation through all execution strategies; checked at scan loop boundaries
@@ -73,7 +73,7 @@
 ## Phase 6 — Observability & Operations
 - [x] **Admin Web UI** — React dashboard with query editor, node explorer, index management, metrics dashboard, slow queries viewer
 - [ ] **Graceful Shutdown** — drain in-flight requests, flush WAL, close bbolt cleanly on SIGTERM/SIGINT
-- [ ] **Health Check Endpoint** — `GET /healthz` and `GET /readyz` for orchestrator probes (Kubernetes, systemd, etc.)
+- [x] **Health Check Endpoint** — `GET /api/health` with role-aware responses (200 OK / 503 Unavailable) for load balancer and orchestrator probes; includes `role` field for intelligent routing
 - [ ] **Configurable Logging Levels** — runtime-tunable log verbosity without restart
 - [ ] **Disk Usage Reporting** — per-shard size, total DB size, free-page ratio via API
 
