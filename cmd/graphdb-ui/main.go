@@ -24,11 +24,16 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
+	"time"
 
 	graphdb "github.com/mstrYoda/goraphdb"
 	"github.com/mstrYoda/goraphdb/replication"
@@ -65,7 +70,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to open database at %s: %v", *dbPath, err)
 	}
-	defer db.Close()
 
 	// Start cluster if configured.
 	var cluster *replication.ClusterManager
@@ -101,7 +105,6 @@ func main() {
 		if err != nil {
 			log.Fatalf("failed to start cluster: %v", err)
 		}
-		defer cluster.Close()
 	}
 
 	srv := server.New(db, *uiDir)
@@ -134,7 +137,52 @@ func main() {
 	}
 	fmt.Println()
 
-	if err := http.ListenAndServe(*addr, srv); err != nil {
-		log.Fatal(err)
+	// -----------------------------------------------------------------------
+	// Graceful shutdown: handle SIGTERM/SIGINT for clean resource cleanup.
+	//
+	// On signal:
+	//   1. Stop accepting new HTTP connections (server.Shutdown)
+	//   2. Wait for in-flight requests to complete (up to 10s)
+	//   3. Close cluster (Raft + gRPC) if running
+	//   4. Close database (flush WAL, close bbolt, stop compaction)
+	// -----------------------------------------------------------------------
+	httpServer := &http.Server{
+		Addr:    *addr,
+		Handler: srv,
 	}
+
+	// Start HTTP server in a goroutine.
+	go func() {
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("HTTP server error: %v", err)
+		}
+	}()
+
+	// Wait for interrupt signal.
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	sig := <-quit
+
+	fmt.Printf("\n  Received %s — shutting down gracefully...\n", sig)
+
+	// Phase 1: Stop HTTP server (allow 10s for in-flight requests).
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := httpServer.Shutdown(ctx); err != nil {
+		log.Printf("HTTP shutdown error: %v", err)
+	} else {
+		fmt.Println("  ✓ HTTP server stopped")
+	}
+
+	// Phase 2: Stop cluster (Raft + gRPC).
+	if cluster != nil {
+		cluster.Close()
+		fmt.Println("  ✓ Cluster stopped (Raft + gRPC)")
+	}
+
+	// Phase 3: Close database.
+	db.Close()
+	fmt.Println("  ✓ Database closed")
+	fmt.Println("  Goodbye!")
 }
