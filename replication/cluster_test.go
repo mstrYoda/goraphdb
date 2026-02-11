@@ -16,10 +16,11 @@ import (
 func TestCluster_AutoElectionAndReplication(t *testing.T) {
 	const numNodes = 3
 
-	// Pre-allocate TCP ports for Raft and gRPC (2 ports per node).
+	// Pre-allocate TCP ports for Raft, gRPC, and HTTP (3 ports per node).
 	type nodeAddrs struct {
 		raftAddr string
 		grpcAddr string
+		httpAddr string
 	}
 	allAddrs := make([]nodeAddrs, numNodes)
 	for i := range allAddrs {
@@ -32,13 +33,21 @@ func TestCluster_AutoElectionAndReplication(t *testing.T) {
 			raftLis.Close()
 			t.Fatalf("allocate grpc port for node%d: %v", i+1, err)
 		}
+		httpLis, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			raftLis.Close()
+			grpcLis.Close()
+			t.Fatalf("allocate http port for node%d: %v", i+1, err)
+		}
 		allAddrs[i] = nodeAddrs{
 			raftAddr: raftLis.Addr().String(),
 			grpcAddr: grpcLis.Addr().String(),
+			httpAddr: fmt.Sprintf("http://%s", httpLis.Addr().String()),
 		}
-		// Close the listeners so Raft and gRPC can bind to these ports later.
+		// Close the listeners so Raft, gRPC, and HTTP can bind to these ports later.
 		raftLis.Close()
 		grpcLis.Close()
+		httpLis.Close()
 	}
 
 	// Open databases and start clusters.
@@ -65,6 +74,7 @@ func TestCluster_AutoElectionAndReplication(t *testing.T) {
 					ID:       fmt.Sprintf("node%d", j+1),
 					RaftAddr: allAddrs[j].raftAddr,
 					GRPCAddr: allAddrs[j].grpcAddr,
+					HTTPAddr: allAddrs[j].httpAddr,
 				})
 			}
 		}
@@ -73,6 +83,7 @@ func TestCluster_AutoElectionAndReplication(t *testing.T) {
 			NodeID:       fmt.Sprintf("node%d", i+1),
 			RaftBindAddr: allAddrs[i].raftAddr,
 			GRPCAddr:     allAddrs[i].grpcAddr,
+			HTTPAddr:     allAddrs[i].httpAddr,
 			RaftDataDir:  filepath.Join(nodeDir, "raft"),
 			Bootstrap:    true,
 			Peers:        peers,
@@ -271,6 +282,7 @@ func TestParsePeers(t *testing.T) {
 		wantID   string // first peer ID
 		wantRaft string // first peer Raft addr
 		wantGRPC string // first peer gRPC addr
+		wantHTTP string // first peer HTTP addr (optional)
 	}{
 		{input: "", wantLen: 0},
 		{
@@ -281,6 +293,14 @@ func TestParsePeers(t *testing.T) {
 			wantGRPC: "10.0.1.2:7001",
 		},
 		{
+			input:    "node2@10.0.1.2:7000@10.0.1.2:7001@http://10.0.1.2:7474",
+			wantLen:  1,
+			wantID:   "node2",
+			wantRaft: "10.0.1.2:7000",
+			wantGRPC: "10.0.1.2:7001",
+			wantHTTP: "http://10.0.1.2:7474",
+		},
+		{
 			input:    "node2@10.0.1.2:7000@10.0.1.2:7001,node3@10.0.1.3:7000@10.0.1.3:7001",
 			wantLen:  2,
 			wantID:   "node2",
@@ -289,6 +309,7 @@ func TestParsePeers(t *testing.T) {
 		},
 		{input: "bad-format", wantErr: true},
 		{input: "id@only_one_part", wantErr: true},
+		{input: "id@a@b@c@d", wantErr: true}, // 5 parts = error
 	}
 
 	for _, tt := range tests {
@@ -316,6 +337,9 @@ func TestParsePeers(t *testing.T) {
 			}
 			if peers[0].GRPCAddr != tt.wantGRPC {
 				t.Errorf("ParsePeers(%q): first peer GRPCAddr=%s, want %s", tt.input, peers[0].GRPCAddr, tt.wantGRPC)
+			}
+			if tt.wantHTTP != "" && peers[0].HTTPAddr != tt.wantHTTP {
+				t.Errorf("ParsePeers(%q): first peer HTTPAddr=%s, want %s", tt.input, peers[0].HTTPAddr, tt.wantHTTP)
 			}
 		}
 	}

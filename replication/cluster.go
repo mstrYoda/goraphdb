@@ -71,6 +71,9 @@ type ClusterConfig struct {
 	// GRPCAddr is the address this node listens on for gRPC WAL replication
 	// when it is the leader (e.g. "0.0.0.0:7001").
 	GRPCAddr string
+	// HTTPAddr is this node's HTTP API address (e.g. "http://127.0.0.1:7474").
+	// Used by followers to forward write operations to the leader.
+	HTTPAddr string
 	// Bootstrap is true if this node should bootstrap a new cluster.
 	// All initial nodes should set this to true with the same peer list.
 	Bootstrap bool
@@ -88,6 +91,9 @@ type ClusterPeer struct {
 	RaftAddr string
 	// GRPCAddr is the peer's gRPC replication address (e.g. "10.0.1.2:7001").
 	GRPCAddr string
+	// HTTPAddr is the peer's HTTP API address (e.g. "http://10.0.1.2:7474").
+	// Used for write forwarding from followers to the leader.
+	HTTPAddr string
 }
 
 // ClusterManager orchestrates leader election, WAL replication, and role
@@ -98,6 +104,7 @@ type ClusterManager struct {
 	log      *slog.Logger
 	election *Election
 	applier  *graphdb.Applier
+	router   *Router
 
 	mu         sync.Mutex
 	grpcServer *grpc.Server
@@ -106,6 +113,8 @@ type ClusterManager struct {
 
 	// Map of nodeID → gRPC address for leader discovery.
 	peerGRPCAddrs map[string]string
+	// Map of nodeID → HTTP address for write forwarding.
+	peerHTTPAddrs map[string]string
 }
 
 // StartCluster initializes the cluster manager: starts Raft election, and
@@ -141,25 +150,36 @@ func StartCluster(db *graphdb.DB, cfg ClusterConfig) (*ClusterManager, error) {
 		log = slog.Default()
 	}
 
-	// Build peer gRPC address map (self + peers).
+	// Build peer address maps (self + peers).
 	peerGRPCAddrs := make(map[string]string)
+	peerHTTPAddrs := make(map[string]string)
 	peerGRPCAddrs[cfg.NodeID] = cfg.GRPCAddr
+	peerHTTPAddrs[cfg.NodeID] = cfg.HTTPAddr
 
 	var raftPeers []PeerConfig
 	for _, p := range cfg.Peers {
 		peerGRPCAddrs[p.ID] = p.GRPCAddr
+		peerHTTPAddrs[p.ID] = p.HTTPAddr
 		raftPeers = append(raftPeers, PeerConfig{ID: p.ID, Addr: p.RaftAddr})
 	}
 
 	// Start in follower mode (safe default until election completes).
 	db.SetRole("follower")
 
+	// Create the query router. It will be updated with the leader's HTTP
+	// address whenever the election callback fires.
+	router := NewRouter(db,
+		WithRouterLogger(log.With("component", "router")),
+	)
+
 	cm := &ClusterManager{
 		db:            db,
 		config:        cfg,
 		log:           log,
 		applier:       graphdb.NewApplier(db),
+		router:        router,
 		peerGRPCAddrs: peerGRPCAddrs,
+		peerHTTPAddrs: peerHTTPAddrs,
 	}
 
 	// Start Raft election.
@@ -187,6 +207,7 @@ func StartCluster(db *graphdb.DB, cfg ClusterConfig) (*ClusterManager, error) {
 		"node_id", cfg.NodeID,
 		"raft_addr", cfg.RaftBindAddr,
 		"grpc_addr", cfg.GRPCAddr,
+		"http_addr", cfg.HTTPAddr,
 		"bootstrap", cfg.Bootstrap,
 		"peers", len(cfg.Peers),
 	)
@@ -219,6 +240,10 @@ func (cm *ClusterManager) becomeLeader() {
 	// Switch DB role to leader (enables writes).
 	cm.db.SetRole("leader")
 
+	// Update router: this node IS the leader, so clear forwarding address
+	// (writes will be handled locally).
+	cm.router.SetLeaderHTTPAddr("")
+
 	// Start gRPC replication server so followers can connect.
 	if cm.grpcServer == nil {
 		if err := cm.startGRPCServer(); err != nil {
@@ -248,7 +273,7 @@ func (cm *ClusterManager) becomeFollower() {
 		cm.replClient = nil
 	}
 
-	// Discover the leader's gRPC address.
+	// Discover the leader's addresses.
 	leaderID := cm.election.LeaderID()
 	leaderGRPC, ok := cm.peerGRPCAddrs[leaderID]
 	if !ok || leaderGRPC == "" {
@@ -256,6 +281,16 @@ func (cm *ClusterManager) becomeFollower() {
 			"leader_id", leaderID,
 		)
 		return
+	}
+
+	// Update router with the leader's HTTP address for write forwarding.
+	leaderHTTP := cm.peerHTTPAddrs[leaderID]
+	cm.router.SetLeaderHTTPAddr(leaderHTTP)
+	if leaderHTTP != "" {
+		cm.log.Info("cluster: router updated with leader HTTP address",
+			"leader_id", leaderID,
+			"leader_http", leaderHTTP,
+		)
 	}
 
 	// Reset applier LSN — new leader has a fresh WAL LSN space.
@@ -317,6 +352,12 @@ func (cm *ClusterManager) stopGRPCServer() {
 // Public API
 // ---------------------------------------------------------------------------
 
+// Router returns the query router that handles read/write splitting
+// and write forwarding to the leader.
+func (cm *ClusterManager) Router() *Router {
+	return cm.router
+}
+
 // Election returns the underlying Raft election module.
 func (cm *ClusterManager) Election() *Election {
 	return cm.election
@@ -365,13 +406,20 @@ func (cm *ClusterManager) Close() error {
 // Peer parsing helpers
 // ---------------------------------------------------------------------------
 
-// ParsePeers parses a comma-separated peer list in the format:
+// ParsePeers parses a comma-separated peer list. Two formats are supported:
 //
-//	"id1@raft_addr1@grpc_addr1,id2@raft_addr2@grpc_addr2"
+// 3-part (without HTTP):
 //
-// Example:
+//	"id@raft_addr@grpc_addr"
 //
-//	"node2@10.0.1.2:7000@10.0.1.2:7001,node3@10.0.1.3:7000@10.0.1.3:7001"
+// 4-part (with HTTP address for write forwarding):
+//
+//	"id@raft_addr@grpc_addr@http_addr"
+//
+// Examples:
+//
+//	"node2@10.0.1.2:7000@10.0.1.2:7001"
+//	"node2@10.0.1.2:7000@10.0.1.2:7001@http://10.0.1.2:7474"
 func ParsePeers(s string) ([]ClusterPeer, error) {
 	if s == "" {
 		return nil, nil
@@ -387,15 +435,20 @@ func ParsePeers(s string) ([]ClusterPeer, error) {
 		}
 
 		fields := strings.Split(p, "@")
-		if len(fields) != 3 {
-			return nil, fmt.Errorf("invalid peer format %q: expected id@raft_addr@grpc_addr", p)
+		if len(fields) < 3 || len(fields) > 4 {
+			return nil, fmt.Errorf("invalid peer format %q: expected id@raft_addr@grpc_addr[@http_addr]", p)
 		}
 
-		peers = append(peers, ClusterPeer{
+		peer := ClusterPeer{
 			ID:       fields[0],
 			RaftAddr: fields[1],
 			GRPCAddr: fields[2],
-		})
+		}
+		if len(fields) == 4 {
+			peer.HTTPAddr = fields[3]
+		}
+
+		peers = append(peers, peer)
 	}
 
 	return peers, nil

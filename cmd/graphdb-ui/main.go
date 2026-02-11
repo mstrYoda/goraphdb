@@ -47,7 +47,7 @@ func main() {
 	raftAddr := flag.String("raft-addr", "", "Raft transport bind address (e.g. 127.0.0.1:7000)")
 	grpcAddr := flag.String("grpc-addr", "", "gRPC replication listen address (e.g. 127.0.0.1:7001)")
 	bootstrap := flag.Bool("bootstrap", false, "Bootstrap a new Raft cluster")
-	peers := flag.String("peers", "", `Comma-separated peer list: "id@raft_addr@grpc_addr,..."`)
+	peers := flag.String("peers", "", `Comma-separated peer list: "id@raft_addr@grpc_addr[@http_addr],..."`)
 
 	flag.Parse()
 
@@ -82,10 +82,18 @@ func main() {
 			log.Fatalf("invalid -peers: %v", err)
 		}
 
+		// Construct this node's HTTP address for the cluster.
+		// The addr flag is the HTTP listen address (e.g. ":7474").
+		httpBase := "http://127.0.0.1" + *addr
+		if (*addr)[0] != ':' {
+			httpBase = "http://" + *addr
+		}
+
 		cluster, err = replication.StartCluster(db, replication.ClusterConfig{
 			NodeID:       *nodeID,
 			RaftBindAddr: *raftAddr,
 			GRPCAddr:     *grpcAddr,
+			HTTPAddr:     httpBase,
 			RaftDataDir:  filepath.Join(*dbPath, "raft"),
 			Bootstrap:    *bootstrap,
 			Peers:        clusterPeers,
