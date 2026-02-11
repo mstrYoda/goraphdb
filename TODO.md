@@ -3,7 +3,7 @@
 ## Phase 1 — Foundation
 - [ ] **Hot Backup / Restore** — consistent snapshot using bbolt's built-in `WriteTo`, zero downtime
 - [x] **Write-Ahead Log (WAL)** — append-only segmented log (64 MB segments, CRC32, msgpack) with WALReader tailing support; enables replication and point-in-time recovery
-- [x] **Write Cypher** — `CREATE`, `SET`, `DELETE`, `MERGE` support in the Cypher engine
+- [x] **Write Cypher** — `CREATE`, `SET`, `DELETE`, `MERGE` support in the Cypher engine; `MATCH...SET` for property updates, `MATCH...DELETE` for node removal, `MERGE ON CREATE SET` / `ON MATCH SET` for conditional upserts
 - [x] **Prometheus Metrics** — atomic counters for queries, errors, cache hits/misses, node/edge CRUD, index lookups; `/metrics` Prometheus text endpoint + `/api/metrics` JSON endpoint
 - [x] **Binary Property Encoding** — replace JSON `encodeProps`/`decodeProps` with MessagePack or custom binary format (3–5× faster, 30–50% smaller)
 - [x] **Node Labels as First-Class Concept** — typed labels (`:Person`, `:Movie`) stored in a separate label index with bitmap lookups instead of faking via `props["label"]`
@@ -78,6 +78,7 @@
 - [ ] **Disk Usage Reporting** — per-shard size, total DB size, free-page ratio via API
 
 ## Phase 7 — Testing & Benchmarks
+- [x] **Load Test CLI (`graphdb-bench`)** — multi-operation benchmark (CreateNode, CreateEdge, MergeNode, UpdateNode, PointRead, LabelScan, Traversal, Neighborhood, IndexedLookup) with leader-aware write routing, replication lag probe, live progress, and histogram-based reporting
 - [ ] **Fuzz Testing** — fuzz Cypher parser, encoding layer, and random graph mutations (Go 1.18+ native fuzzing)
 - [ ] **Linearizability Tests** — concurrent write + read tests asserting no torn reads or lost updates
 - [ ] **Crash Recovery Tests** — kill process mid-write, verify DB opens cleanly and is consistent
@@ -85,3 +86,9 @@
 - [ ] **Official Go Client Library** — `graphdb.Client` with retries, connection pooling, and parameter binding
 - [ ] **Snapshot Isolation Cross-Shard** — cross-shard snapshot coordinator for consistent multi-shard reads
 - [ ] **Deadlock Detection** — wait-for graph or wound-wait prevention for multi-statement cross-shard transactions
+
+## Performance Optimizations (Completed)
+- [x] **WAL Group Commit** — batch `fsync` with background goroutine (2ms interval); eliminates per-write fsync serialization that capped throughput at ~80 ops/s
+- [x] **Cypher SET/DELETE** — `MATCH...SET n.prop = val`, `MATCH...DELETE n`; `MERGE ON CREATE SET` / `ON MATCH SET` for conditional upserts
+- [x] **Leader-Aware Bench Routing** — `graphdb-bench` auto-detects cluster leader; writes go directly to leader (no follower→leader forwarding overhead)
+- [x] **REST Node Update** — `PUT /api/nodes/{id}` for O(1) property mutations; benchmark uses REST instead of Cypher for UpdateNode

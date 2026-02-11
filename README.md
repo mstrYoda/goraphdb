@@ -17,7 +17,7 @@ A high-performance, embeddable graph database written in Go. Built on top of [bb
 - **Composite indexes** — multi-property indexes for fast compound lookups (`CreateCompositeIndex("city", "age")`)
 - **Unique constraints** — `CreateUniqueConstraint(label, property)` enforces value uniqueness across nodes with the same label; O(1) lookup via dedicated `idx_unique` bucket; WAL-replicated to followers
 - **Bloom filter for HasEdge()** — in-memory probabilistic filter (~1.5 % false positive rate, zero false negatives) avoids disk I/O when edges definitely don't exist; rebuilt from `adj_out` on startup; `graphdb_bloom_negatives_total` Prometheus counter tracks savings
-- **Cypher query language** — read and write support with index-aware execution, LIMIT push-down, ORDER BY + LIMIT heap, query plan caching, `OPTIONAL MATCH`, `EXPLAIN`/`PROFILE`, parameterized queries, `CREATE` for inserting nodes/edges, and `MERGE` for upsert (match-or-create) semantics with `ON CREATE SET` / `ON MATCH SET`
+- **Cypher query language** — read and write support with index-aware execution, LIMIT push-down, ORDER BY + LIMIT heap, query plan caching, `OPTIONAL MATCH`, `EXPLAIN`/`PROFILE`, parameterized queries, `CREATE` for inserting nodes/edges, `MERGE` for upsert (match-or-create) semantics with `ON CREATE SET` / `ON MATCH SET`, `MATCH...SET` for property updates, `MATCH...DELETE` for node removal, `SKIP` for pagination
 - **Query timeout** — `CypherContext`/`CypherWithParamsContext` accept `context.Context` for deadline-based cancellation at scan loop boundaries
 - **Transactions** — `Begin`/`Commit`/`Rollback` API for multi-statement atomic operations with read-your-writes semantics
 - **EXPLAIN / PROFILE** — query plan tree with operator types; `PROFILE` adds per-operator row counts and wall-clock timing
@@ -35,7 +35,7 @@ A high-performance, embeddable graph database written in Go. Built on top of [bb
 - **Batch operations** — `AddNodeBatch` / `AddEdgeBatch` for bulk loading with single-fsync transactions
 - **Worker pool** — built-in goroutine pool for concurrent query execution
 - **Optional sharding** — hash-based partitioning across multiple bbolt files; edges co-located with source nodes for single-shard traversals
-- **Single-leader replication** — WAL-based log shipping over gRPC with automatic leader election (hashicorp/raft), follower Applier, and exponential backoff reconnect
+- **Single-leader replication** — WAL-based log shipping over gRPC with automatic leader election (hashicorp/raft), follower Applier, and exponential backoff reconnect; WAL group commit (batched fsync) for high write throughput
 - **Transparent write forwarding** — followers automatically forward writes to the leader via HTTP; clients can connect to any node
 - **Health check endpoint** — `GET /api/health` returns role-aware status (leader/follower/standalone) for load balancer integration
 - **Cluster status endpoint** — `GET /api/cluster` exposes node ID, role, leader ID, and cluster topology
@@ -718,6 +718,7 @@ Roles can be changed at runtime via `db.SetRole("leader")` — used by the Raft 
 - **Rotation**: new segment at 64 MB
 - **18 operation types**: AddNode, AddNodeBatch, UpdateNode, SetNodeProps, DeleteNode, AddEdge, AddEdgeBatch, DeleteEdge, UpdateEdge, AddNodeWithLabels, AddLabel, RemoveLabel, CreateIndex, DropIndex, CreateCompositeIndex, DropCompositeIndex, CreateUniqueConstraint, DropUniqueConstraint
 - **Tailing**: WALReader supports live tailing — returns `io.EOF` at the end of the active segment, resumes on next call when new data is appended
+- **Group commit**: Background goroutine batches `fsync` calls (2 ms interval by default); writes are buffered to the OS immediately but fsynced in groups, eliminating per-write fsync serialization that otherwise caps throughput at ~80 ops/s
 
 ### Write Forwarding
 
@@ -897,6 +898,10 @@ curl -X POST http://localhost:7474/api/indexes \
 # List nodes (paginated)
 curl http://localhost:7474/api/nodes?limit=20&offset=0
 
+# Update a node's properties (merge)
+curl -X PUT http://localhost:7474/api/nodes/1 \
+  -d '{"props": {"age": 31, "city": "Istanbul"}}'
+
 # Get a node's neighborhood (node + neighbors + edges)
 curl http://localhost:7474/api/nodes/1/neighborhood
 
@@ -982,6 +987,37 @@ go run ./examples/integrity/
 
 ## Benchmarks
 
+### Load Test CLI (`graphdb-bench`)
+
+A comprehensive load testing tool for single-node or cluster deployments:
+
+```bash
+# Single-node benchmark (30s, 8 writers, 16 readers)
+go run ./cmd/graphdb-bench/ \
+  -targets "http://127.0.0.1:7474" \
+  -duration 30s -writers 8 -readers 16
+
+# 3-node cluster benchmark (auto-detects leader for writes)
+go run ./cmd/graphdb-bench/ \
+  -targets "http://127.0.0.1:7474,http://127.0.0.1:7475,http://127.0.0.1:7476" \
+  -duration 60s -writers 16 -readers 32
+
+# Without secondary indexes
+go run ./cmd/graphdb-bench/ \
+  -targets "http://127.0.0.1:7474" \
+  -duration 30s -no-indexes
+```
+
+Features:
+- **Leader-aware routing** — auto-detects the cluster leader and sends all writes directly (no forwarding overhead)
+- **Write operations**: CreateNode, CreateEdge, MergeNode (Cypher MERGE), UpdateNode (REST PUT)
+- **Read operations**: PointRead, LabelScan, Traversal, Neighborhood, IndexedLookup
+- **Replication lag probe** — measures canary write propagation to followers
+- **Live progress** — real-time ops/s, p99 latency, error rate
+- **Histogram-based report** — per-operation p50/p95/p99/max latency breakdown
+
+### Unit Benchmarks
+
 Run the built-in benchmarks:
 
 ```bash
@@ -1049,7 +1085,12 @@ go test -bench=. -benchmem # benchmarks
 - [x] **Unique Constraints** — `CreateUniqueConstraint(label, property)` with O(1) lookup via `idx_unique` bucket; enforced on all write paths; WAL-replicated; Cypher `MERGE` uses constraints for efficient upsert
 - [x] **Query Timeout & Cancellation** — context-based cancellation for long-running queries
 - [x] **Graceful Shutdown** — SIGTERM/SIGINT handler with ordered teardown: HTTP drain (10s) → Raft/gRPC stop → WAL flush → bbolt close
+- [x] **WAL Group Commit** — batched fsync with background goroutine (2ms interval); eliminates per-write serialization bottleneck
+- [x] **Cypher SET/DELETE** — `MATCH...SET`, `MATCH...DELETE`, `MERGE ON CREATE SET / ON MATCH SET`
 - [ ] **Connection Pooling & Rate Limiting** — protect against runaway queries in multi-tenant setups
+
+### Phase 5 — Testing & Benchmarks
+- [x] **Load Test CLI (`graphdb-bench`)** — multi-operation benchmark with leader-aware routing, replication lag probe, histogram reporting
 
 ## License
 
