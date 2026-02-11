@@ -3,6 +3,7 @@ package graphdb
 import (
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 // --------------------------------------------------------------------------
@@ -178,6 +179,24 @@ func (p *parser) parseQuery() (*CypherQuery, error) {
 		}
 	}
 
+	// SET (optional) — MATCH ... WHERE ... SET n.prop = val
+	if p.is(tokSet) {
+		items, err := p.parseSetClause()
+		if err != nil {
+			return nil, err
+		}
+		q.Set = items
+	}
+
+	// DELETE (optional) — MATCH ... WHERE ... DELETE n
+	if p.is(tokDelete) {
+		vars, err := p.parseDeleteClause()
+		if err != nil {
+			return nil, err
+		}
+		q.Delete = vars
+	}
+
 	// RETURN
 	ret, err := p.parseReturnClause()
 	if err != nil {
@@ -196,6 +215,17 @@ func (p *parser) parseQuery() (*CypherQuery, error) {
 			return nil, err
 		}
 		q.OrderBy = items
+	}
+
+	// SKIP (optional)
+	if p.is(tokSkip) {
+		p.advance()
+		tok, err := p.expect(tokInt)
+		if err != nil {
+			return nil, fmt.Errorf("cypher parser: SKIP requires an integer")
+		}
+		n, _ := strconv.Atoi(tok.Text)
+		q.Skip = n
 	}
 
 	// LIMIT (optional)
@@ -782,6 +812,40 @@ func (p *parser) parseMergeQuery() (*CypherMerge, error) {
 		Props:    node.Props,
 	}
 
+	// Optional ON CREATE SET / ON MATCH SET clauses (may appear in any order).
+	for p.is(tokOn) {
+		p.advance() // consume ON
+		tok := p.cur()
+
+		switch tok.Kind {
+		case tokCreate:
+			p.advance() // consume CREATE
+			if _, err := p.expect(tokSet); err != nil {
+				return nil, fmt.Errorf("cypher parser: expected SET after ON CREATE at position %d", tok.Pos)
+			}
+			items, err := p.parseSetItems()
+			if err != nil {
+				return nil, err
+			}
+			m.OnCreateSet = items
+
+		case tokMatch:
+			p.advance() // consume MATCH
+			if _, err := p.expect(tokSet); err != nil {
+				return nil, fmt.Errorf("cypher parser: expected SET after ON MATCH at position %d", tok.Pos)
+			}
+			items, err := p.parseSetItems()
+			if err != nil {
+				return nil, err
+			}
+			m.OnMatchSet = items
+
+		default:
+			return nil, fmt.Errorf("cypher parser: expected CREATE or MATCH after ON at position %d, got %s",
+				tok.Pos, tokenKindName(tok.Kind))
+		}
+	}
+
 	// Optional RETURN clause.
 	if p.is(tokReturn) {
 		ret, err := p.parseReturnClause()
@@ -829,4 +893,108 @@ func (p *parser) parseCreatePattern() (CreatePattern, error) {
 	}
 
 	return cp, nil
+}
+
+// ---------------------------------------------------------------------------
+// SET clause parsing
+// ---------------------------------------------------------------------------
+
+// parseSetClause consumes a SET keyword and one or more property assignments.
+//
+//	SET n.name = "Alice", n.age = 30
+func (p *parser) parseSetClause() ([]SetItem, error) {
+	if _, err := p.expect(tokSet); err != nil {
+		return nil, err
+	}
+	return p.parseSetItems()
+}
+
+// parseSetItems parses one or more comma-separated SET items.
+// Called after the SET keyword has already been consumed.
+//
+//	n.name = "Alice", n.age = 30
+func (p *parser) parseSetItems() ([]SetItem, error) {
+	var items []SetItem
+	for {
+		item, err := p.parseSetItem()
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+
+		if !p.match(tokComma) {
+			break
+		}
+	}
+	return items, nil
+}
+
+// parseSetItem parses a single property assignment: n.prop = expr
+func (p *parser) parseSetItem() (SetItem, error) {
+	// Variable name.
+	varTok, err := p.expect(tokIdent)
+	if err != nil {
+		return SetItem{}, fmt.Errorf("cypher parser: SET expects a variable name, got %s at position %d",
+			tokenKindName(p.cur().Kind), p.cur().Pos)
+	}
+
+	if _, err := p.expect(tokDot); err != nil {
+		return SetItem{}, fmt.Errorf("cypher parser: SET expects variable.property, missing '.' at position %d", p.cur().Pos)
+	}
+
+	propTok, err := p.expect(tokIdent)
+	if err != nil {
+		return SetItem{}, fmt.Errorf("cypher parser: SET expects a property name after '.', got %s at position %d",
+			tokenKindName(p.cur().Kind), p.cur().Pos)
+	}
+
+	if _, err := p.expect(tokEq); err != nil {
+		return SetItem{}, fmt.Errorf("cypher parser: SET expects '=' after %s.%s at position %d",
+			varTok.Text, propTok.Text, p.cur().Pos)
+	}
+
+	val, err := p.parsePrimary()
+	if err != nil {
+		return SetItem{}, fmt.Errorf("cypher parser: SET value: %w", err)
+	}
+
+	return SetItem{
+		Variable: varTok.Text,
+		Property: propTok.Text,
+		Value:    val,
+	}, nil
+}
+
+// ---------------------------------------------------------------------------
+// DELETE clause parsing
+// ---------------------------------------------------------------------------
+
+// parseDeleteClause consumes a DELETE keyword and one or more variable names.
+//
+//	DELETE n     → ["n"]
+//	DELETE n, r  → ["n", "r"]
+func (p *parser) parseDeleteClause() ([]string, error) {
+	if _, err := p.expect(tokDelete); err != nil {
+		return nil, err
+	}
+
+	var vars []string
+	for {
+		tok, err := p.expect(tokIdent)
+		if err != nil {
+			return nil, fmt.Errorf("cypher parser: DELETE expects a variable name, got %s at position %d",
+				tokenKindName(p.cur().Kind), p.cur().Pos)
+		}
+		vars = append(vars, tok.Text)
+
+		if !p.match(tokComma) {
+			break
+		}
+	}
+	return vars, nil
+}
+
+// isIdentText checks if the current token is an identifier with the given text (case-insensitive).
+func (p *parser) isIdentText(text string) bool {
+	return p.cur().Kind == tokIdent && strings.EqualFold(p.cur().Text, text)
 }

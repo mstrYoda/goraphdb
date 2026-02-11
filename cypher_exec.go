@@ -103,6 +103,24 @@ func (db *DB) Cypher(ctx context.Context, query string) (*CypherResult, error) {
 			return result, err
 		}
 
+		// MATCH ... SET / DELETE — write path that needs writeGuard.
+		if len(parsed.read.Set) > 0 || len(parsed.read.Delete) > 0 {
+			if err := db.writeGuard(); err != nil {
+				return nil, err
+			}
+			start := time.Now()
+			result, err := db.executeCypherMutating(ctx, parsed.read)
+			elapsed := time.Since(start)
+			if db.metrics != nil {
+				db.metrics.QueriesTotal.Add(1)
+				db.metrics.recordQueryDuration(elapsed)
+				if err != nil {
+					db.metrics.QueryErrorTotal.Add(1)
+				}
+			}
+			return result, err
+		}
+
 		// MATCH query — cache the AST and execute read path.
 		db.cache.put(query, parsed.read)
 		return db.executeCypherRead(ctx, query, parsed.read)
@@ -128,6 +146,73 @@ func (db *DB) executeCypherRead(ctx context.Context, query string, ast *CypherQu
 	}
 
 	return result, err
+}
+
+// executeCypherMutating handles MATCH ... SET / DELETE — queries that read first, then mutate.
+// The caller must have already called writeGuard().
+func (db *DB) executeCypherMutating(ctx context.Context, q *CypherQuery) (*CypherResult, error) {
+	// First: execute the MATCH/WHERE as a normal read to collect matched rows.
+	// We create a read-only copy without SET/DELETE so the normal executor
+	// handles the pattern matching.
+	readQ := *q
+	readQ.Set = nil
+	readQ.Delete = nil
+
+	result, err := db.executeCypher(ctx, &readQ)
+	if err != nil {
+		return nil, err
+	}
+
+	// Apply SET mutations to each matched row.
+	if len(q.Set) > 0 {
+		for _, row := range result.Rows {
+			for _, si := range q.Set {
+				nodeVal, ok := row[si.Variable]
+				if !ok {
+					continue
+				}
+				node, ok := nodeVal.(*Node)
+				if !ok {
+					continue
+				}
+				// Resolve the value.
+				val, err := evalExpr(&si.Value, row)
+				if err != nil {
+					return nil, fmt.Errorf("cypher exec: SET value eval: %w", err)
+				}
+				// Call UpdateNode to persist + WAL.
+				if err := db.UpdateNode(node.ID, Props{si.Property: val}); err != nil {
+					return nil, fmt.Errorf("cypher exec: SET %s.%s failed: %w", si.Variable, si.Property, err)
+				}
+				// Update in-memory for the RETURN result.
+				node.Props[si.Property] = val
+			}
+		}
+	}
+
+	// Apply DELETE mutations.
+	if len(q.Delete) > 0 {
+		for _, row := range result.Rows {
+			for _, varName := range q.Delete {
+				val, ok := row[varName]
+				if !ok {
+					continue
+				}
+				switch v := val.(type) {
+				case *Node:
+					if err := db.DeleteNode(v.ID); err != nil {
+						return nil, fmt.Errorf("cypher exec: DELETE node %d failed: %w", v.ID, err)
+					}
+				case *Edge:
+					if err := db.DeleteEdge(v.ID); err != nil {
+						return nil, fmt.Errorf("cypher exec: DELETE edge %d failed: %w", v.ID, err)
+					}
+				}
+			}
+		}
+	}
+
+	return result, nil
 }
 
 // CypherWithParams parses and executes a parameterized Cypher query.

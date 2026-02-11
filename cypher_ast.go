@@ -16,16 +16,31 @@ const (
 
 // CypherQuery is the top-level AST node for a read query.
 //
-//	[EXPLAIN|PROFILE] MATCH <pattern> [WHERE <expr>] [OPTIONAL MATCH <pattern>] RETURN <items> [ORDER BY <items>] [LIMIT <n>]
+//	[EXPLAIN|PROFILE] MATCH <pattern> [WHERE <expr>] [OPTIONAL MATCH <pattern>]
+//	    [SET <items>] [DELETE <items>] [REMOVE <items>]
+//	    RETURN <items> [ORDER BY <items>] [SKIP <n>] [LIMIT <n>]
 type CypherQuery struct {
 	Explain       ExplainMode // ExplainNone, ExplainOnly, or ExplainProfile
 	Match         MatchClause
 	Where         *Expression  // nil when there is no WHERE
 	OptionalMatch *MatchClause // nil when there is no OPTIONAL MATCH
 	OptionalWhere *Expression  // nil when there is no WHERE after OPTIONAL MATCH
+	Set           []SetItem    // nil when there is no SET
+	Delete        []string     // variable names to delete; nil when no DELETE
 	Return        ReturnClause
 	OrderBy       []OrderItem // nil when there is no ORDER BY
+	Skip          int         // 0 means no skip
 	Limit         int         // 0 means no limit
+}
+
+// SetItem represents a single property assignment in a SET clause.
+//
+//	SET n.name = "Alice"   → Variable="n", Property="name", Value=litExpr("Alice")
+//	SET n.age  = 30        → Variable="n", Property="age",  Value=litExpr(30)
+type SetItem struct {
+	Variable string     // the bound variable (e.g., "n")
+	Property string     // the property key   (e.g., "name")
+	Value    Expression // the new value
 }
 
 // MatchClause holds the pattern that follows the MATCH keyword.
@@ -238,17 +253,25 @@ type CreatePattern struct {
 
 // CypherMerge is the top-level AST node for a MERGE query.
 //
-//	MERGE (n:Label {key: value}) RETURN n
+//	MERGE (n:Label {key: value})
+//	  [ON CREATE SET n.prop = val, ...]
+//	  [ON MATCH  SET n.prop = val, ...]
+//	  [RETURN ...]
 //
 // MERGE finds or creates a node. It first tries to match a node with the
 // given labels and properties. If found, it binds it. If not found, it
 // creates a new node with those labels and properties and binds it.
 //
+// ON CREATE SET is applied only when a new node is created.
+// ON MATCH SET  is applied only when an existing node is matched.
+//
 // This provides upsert semantics and is typically used with unique constraints
 // to implement "get-or-create" patterns.
 type CypherMerge struct {
-	Pattern MergePattern  // the node pattern to match or create
-	Return  *ReturnClause // optional RETURN clause
+	Pattern     MergePattern  // the node pattern to match or create
+	OnCreateSet []SetItem     // applied when node is created
+	OnMatchSet  []SetItem     // applied when node is matched
+	Return      *ReturnClause // optional RETURN clause
 }
 
 // MergePattern describes a single node to be merged (matched or created).

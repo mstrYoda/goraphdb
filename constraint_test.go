@@ -3,6 +3,7 @@ package graphdb
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -256,4 +257,163 @@ func TestCypherMerge_WithoutConstraint(t *testing.T) {
 	if node1.ID != node2.ID {
 		t.Fatalf("expected same node, got different IDs: %d vs %d", node1.ID, node2.ID)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Cypher SET tests
+// ---------------------------------------------------------------------------
+
+func TestCypherSet_Basic(t *testing.T) {
+	db := testDB(t)
+
+	// Create a node.
+	id, err := db.AddNode(Props{"name": "Alice", "age": int64(25)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// SET a new property and change an existing one.
+	result, err := db.Cypher(context.Background(),
+		`MATCH (n) WHERE id(n) = `+itoa(id)+` SET n.city = "Istanbul", n.age = 30 RETURN n`)
+	if err != nil {
+		t.Fatalf("SET failed: %v", err)
+	}
+	if len(result.Rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(result.Rows))
+	}
+
+	// Verify changes persisted.
+	node, err := db.GetNode(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if node.Props["city"] != "Istanbul" {
+		t.Errorf("expected city=Istanbul, got %v", node.Props["city"])
+	}
+	if node.Props["age"] != int64(30) {
+		t.Errorf("expected age=30, got %v (type %T)", node.Props["age"], node.Props["age"])
+	}
+	if node.Props["name"] != "Alice" {
+		t.Errorf("name should be unchanged, got %v", node.Props["name"])
+	}
+}
+
+func TestCypherSet_FollowerRejects(t *testing.T) {
+	db := testDB(t, Options{ShardCount: 1, Role: "follower"})
+
+	_, err := db.Cypher(context.Background(),
+		`MATCH (n) WHERE id(n) = 1 SET n.name = "Bob" RETURN n`)
+	if !errors.Is(err, ErrReadOnlyReplica) {
+		t.Fatalf("expected ErrReadOnlyReplica for SET on follower, got: %v", err)
+	}
+}
+
+func TestCypherDelete_Basic(t *testing.T) {
+	db := testDB(t)
+
+	// Create a node.
+	id, err := db.AddNode(Props{"name": "ToDelete"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// DELETE via Cypher.
+	_, err = db.Cypher(context.Background(),
+		`MATCH (n) WHERE id(n) = `+itoa(id)+` DELETE n RETURN n`)
+	if err != nil {
+		t.Fatalf("DELETE failed: %v", err)
+	}
+
+	// Node should be gone.
+	_, err = db.GetNode(id)
+	if err == nil {
+		t.Fatal("expected error after DELETE, got nil")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// MERGE ON CREATE SET / ON MATCH SET tests
+// ---------------------------------------------------------------------------
+
+func TestCypherMerge_OnCreateSet(t *testing.T) {
+	db := testDB(t)
+
+	// MERGE creates a new node → ON CREATE SET should apply.
+	result, err := db.Cypher(context.Background(),
+		`MERGE (n:Person {name: "Alice"}) ON CREATE SET n.source = "created" RETURN n`)
+	if err != nil {
+		t.Fatalf("MERGE ON CREATE SET failed: %v", err)
+	}
+	if len(result.Rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(result.Rows))
+	}
+
+	node := result.Rows[0]["n"].(*Node)
+	if node.Props["source"] != "created" {
+		t.Errorf("expected source=created, got %v", node.Props["source"])
+	}
+
+	// Verify ON CREATE SET persisted.
+	persisted, _ := db.GetNode(node.ID)
+	if persisted.Props["source"] != "created" {
+		t.Errorf("expected persisted source=created, got %v", persisted.Props["source"])
+	}
+}
+
+func TestCypherMerge_OnMatchSet(t *testing.T) {
+	db := testDB(t)
+
+	// Create a node first.
+	db.Cypher(context.Background(), `MERGE (n:Person {name: "Bob"}) RETURN n`)
+
+	// MERGE again → should match → ON MATCH SET should apply.
+	result, err := db.Cypher(context.Background(),
+		`MERGE (n:Person {name: "Bob"}) ON MATCH SET n.updated = "yes" RETURN n`)
+	if err != nil {
+		t.Fatalf("MERGE ON MATCH SET failed: %v", err)
+	}
+	if len(result.Rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(result.Rows))
+	}
+
+	node := result.Rows[0]["n"].(*Node)
+	if node.Props["updated"] != "yes" {
+		t.Errorf("expected updated=yes, got %v", node.Props["updated"])
+	}
+}
+
+func TestCypherMerge_OnCreateAndOnMatchSet(t *testing.T) {
+	db := testDB(t)
+
+	// First MERGE → creates → ON CREATE SET applies, ON MATCH SET does NOT.
+	result1, err := db.Cypher(context.Background(),
+		`MERGE (n:Person {name: "Eve"}) ON CREATE SET n.source = "new" ON MATCH SET n.source = "existing" RETURN n`)
+	if err != nil {
+		t.Fatalf("first MERGE failed: %v", err)
+	}
+	node1 := result1.Rows[0]["n"].(*Node)
+	if node1.Props["source"] != "new" {
+		t.Errorf("first MERGE: expected source=new, got %v", node1.Props["source"])
+	}
+
+	// Second MERGE → matches → ON MATCH SET applies.
+	result2, err := db.Cypher(context.Background(),
+		`MERGE (n:Person {name: "Eve"}) ON CREATE SET n.source = "new" ON MATCH SET n.source = "existing" RETURN n`)
+	if err != nil {
+		t.Fatalf("second MERGE failed: %v", err)
+	}
+	node2 := result2.Rows[0]["n"].(*Node)
+	if node2.Props["source"] != "existing" {
+		t.Errorf("second MERGE: expected source=existing, got %v", node2.Props["source"])
+	}
+
+	// Should still be just 1 node.
+	if db.NodeCount() != 1 {
+		t.Fatalf("expected 1 node, got %d", db.NodeCount())
+	}
+}
+
+// helper to convert NodeID to string
+func itoa(id NodeID) string {
+	return fmt.Sprintf("%d", id)
 }

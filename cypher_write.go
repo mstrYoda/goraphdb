@@ -240,6 +240,7 @@ func (db *DB) executeMerge(ctx context.Context, m *CypherMerge) (*CypherResult, 
 	}
 
 	// Step 2: If no match found, create the node.
+	wasCreated := false
 	if matched == nil {
 		if err := db.writeGuard(); err != nil {
 			return nil, err
@@ -259,11 +260,44 @@ func (db *DB) executeMerge(ctx context.Context, m *CypherMerge) (*CypherResult, 
 		if err != nil {
 			return nil, err
 		}
+		wasCreated = true
 	}
 
 	// Bind the variable.
 	if mp.Variable != "" {
 		bindings[mp.Variable] = matched
+	}
+
+	// Step 3: Apply ON CREATE SET / ON MATCH SET clauses.
+	var setItems []SetItem
+	if wasCreated {
+		setItems = m.OnCreateSet
+	} else {
+		setItems = m.OnMatchSet
+	}
+	if len(setItems) > 0 {
+		// ON MATCH SET needs writeGuard (ON CREATE SET already passed through it).
+		if !wasCreated {
+			if err := db.writeGuard(); err != nil {
+				return nil, err
+			}
+		}
+		updateProps := make(Props, len(setItems))
+		for _, si := range setItems {
+			val, err := evalExpr(&si.Value, bindings)
+			if err != nil {
+				return nil, fmt.Errorf("cypher exec: MERGE SET value eval: %w", err)
+			}
+			updateProps[si.Property] = val
+		}
+		if err := db.UpdateNode(matched.ID, updateProps); err != nil {
+			return nil, fmt.Errorf("cypher exec: MERGE SET failed: %w", err)
+		}
+		// Refresh matched node to reflect updates.
+		matched, _ = db.getNode(matched.ID)
+		if mp.Variable != "" {
+			bindings[mp.Variable] = matched
+		}
 	}
 
 	// Build result.
