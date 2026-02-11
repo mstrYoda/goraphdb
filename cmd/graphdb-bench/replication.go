@@ -139,3 +139,34 @@ func checkTargets(targets []string) error {
 	}
 	return nil
 }
+
+// ---------------------------------------------------------------------------
+// Leader detection — query /api/cluster on each target to find the leader.
+// This avoids sending writes through the follower → leader HTTP forwarding
+// path, which adds a full extra network round-trip per write.
+// ---------------------------------------------------------------------------
+
+func detectLeader(targets []string) string {
+	for _, t := range targets {
+		resp, err := http.Get(t + "/api/cluster")
+		if err != nil {
+			continue
+		}
+		var info struct {
+			Role     string `json:"role"`
+			LeaderID string `json:"leader_id"`
+			HTTPAddr string `json:"http_addr"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+			readAndClose(resp)
+			continue
+		}
+		resp.Body.Close()
+
+		// If this node reports itself as leader, use it directly.
+		if info.Role == "leader" {
+			return t
+		}
+	}
+	return ""
+}

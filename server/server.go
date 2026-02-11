@@ -143,6 +143,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/nodes/{id}", s.handleGetNode)
 	s.mux.HandleFunc("GET /api/nodes/{id}/neighborhood", s.handleNodeNeighborhood)
 	s.mux.HandleFunc("POST /api/nodes", s.handleCreateNode)
+	s.mux.HandleFunc("PUT /api/nodes/{id}", s.handleUpdateNode)
 	s.mux.HandleFunc("DELETE /api/nodes/{id}", s.handleDeleteNode)
 
 	// Edges
@@ -741,6 +742,38 @@ func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]string{"status": "deleted"})
+}
+
+func (s *Server) handleUpdateNode(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseUint(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, 400, "invalid node id")
+		return
+	}
+
+	var req struct {
+		Props map[string]any `json:"props"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "invalid JSON body")
+		return
+	}
+
+	var updateErr error
+	if s.router != nil {
+		updateErr = s.router.UpdateNode(graphdb.NodeID(id), req.Props)
+	} else {
+		updateErr = s.db.UpdateNode(graphdb.NodeID(id), req.Props)
+	}
+	if updateErr != nil {
+		status := 500
+		if errors.Is(updateErr, graphdb.ErrReadOnlyReplica) {
+			status = 503
+		}
+		writeError(w, status, updateErr.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]string{"status": "updated"})
 }
 
 // ---------------------------------------------------------------------------

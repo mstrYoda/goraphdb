@@ -261,7 +261,11 @@ func doMergeNode(
 	}
 }
 
-// doUpdateNode updates a random existing node.
+// doUpdateNode updates a random existing node via the REST API.
+//
+// Uses PUT /api/nodes/{id} which is a direct UpdateNode call — much faster
+// than the Cypher MATCH...SET path since there's no query parsing or
+// pattern matching overhead.
 func doUpdateNode(
 	ctx context.Context,
 	target string,
@@ -275,13 +279,20 @@ func doUpdateNode(
 		return
 	}
 
-	query := fmt.Sprintf(
-		`MATCH (n) WHERE id(n) = %d SET n.updated = "%s" RETURN n`,
-		id, time.Now().Format(time.RFC3339),
-	)
+	url := fmt.Sprintf("%s/api/nodes/%d", target, id)
+	body := map[string]any{
+		"props": map[string]any{
+			"updated": time.Now().Format(time.RFC3339),
+			"score":   rng.Float64(),
+		},
+	}
+
+	data, _ := json.Marshal(body)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(data))
+	req.Header.Set("Content-Type", "application/json")
 
 	start := time.Now()
-	resp, err := postJSON(target+"/api/cypher", map[string]string{"query": query})
+	resp, err := httpClient.Do(req)
 	dur := time.Since(start)
 	readAndClose(resp)
 

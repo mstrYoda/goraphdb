@@ -29,30 +29,32 @@ import (
 
 // BenchConfig holds all CLI-driven configuration for the benchmark.
 type BenchConfig struct {
-	Targets    []string
-	Duration   time.Duration
-	Writers    int
-	Readers    int
-	SeedNodes  int
-	SeedEdges  int
-	Warmup     time.Duration
-	Cooldown   time.Duration
-	RepProbe   bool // whether to run replication lag probing
-	NoIndexes  bool // skip index creation to test unindexed performance
+	Targets      []string
+	WriteTarget  string        // explicit leader target for writes (auto-detected if empty)
+	Duration     time.Duration
+	Writers      int
+	Readers      int
+	SeedNodes    int
+	SeedEdges    int
+	Warmup       time.Duration
+	Cooldown     time.Duration
+	RepProbe     bool // whether to run replication lag probing
+	NoIndexes    bool // skip index creation to test unindexed performance
 }
 
 func main() {
 	var (
-		targetsStr = flag.String("targets", "http://127.0.0.1:7474", "Comma-separated list of GoraphDB HTTP endpoints")
-		duration   = flag.Duration("duration", 30*time.Second, "Benchmark duration (e.g. 30s, 1m, 5m)")
-		writers    = flag.Int("writers", 8, "Number of concurrent write goroutines")
-		readers    = flag.Int("readers", 16, "Number of concurrent read goroutines")
+		targetsStr    = flag.String("targets", "http://127.0.0.1:7474", "Comma-separated list of GoraphDB HTTP endpoints")
+		writeTargetStr = flag.String("write-target", "", "Explicit leader endpoint for writes (auto-detected from cluster if empty)")
+		duration      = flag.Duration("duration", 30*time.Second, "Benchmark duration (e.g. 30s, 1m, 5m)")
+		writers       = flag.Int("writers", 8, "Number of concurrent write goroutines")
+		readers       = flag.Int("readers", 16, "Number of concurrent read goroutines")
 		seedNodeCount = flag.Int("seed-nodes", 200, "Number of nodes to create during warmup")
 		seedEdgeCount = flag.Int("seed-edges", 100, "Number of edges to create during warmup")
-		warmup     = flag.Duration("warmup", 5*time.Second, "Warmup duration before collecting stats")
-		cooldown   = flag.Duration("cooldown", 2*time.Second, "Cooldown duration after stopping writers")
-		noRepProbe = flag.Bool("no-rep-probe", false, "Disable replication lag probing")
-		noIndexes  = flag.Bool("no-indexes", false, "Skip index creation (test unindexed performance)")
+		warmup        = flag.Duration("warmup", 5*time.Second, "Warmup duration before collecting stats")
+		cooldown      = flag.Duration("cooldown", 2*time.Second, "Cooldown duration after stopping writers")
+		noRepProbe    = flag.Bool("no-rep-probe", false, "Disable replication lag probing")
+		noIndexes     = flag.Bool("no-indexes", false, "Skip index creation (test unindexed performance)")
 	)
 	flag.Parse()
 
@@ -62,16 +64,17 @@ func main() {
 	}
 
 	cfg := BenchConfig{
-		Targets:   targets,
-		Duration:  *duration,
-		Writers:   *writers,
-		Readers:   *readers,
-		SeedNodes: *seedNodeCount,
-		SeedEdges: *seedEdgeCount,
-		Warmup:    *warmup,
-		Cooldown:   *cooldown,
-		RepProbe:   !*noRepProbe,
-		NoIndexes:  *noIndexes,
+		Targets:     targets,
+		WriteTarget: strings.TrimSpace(*writeTargetStr),
+		Duration:    *duration,
+		Writers:     *writers,
+		Readers:     *readers,
+		SeedNodes:   *seedNodeCount,
+		SeedEdges:   *seedEdgeCount,
+		Warmup:      *warmup,
+		Cooldown:    *cooldown,
+		RepProbe:    !*noRepProbe,
+		NoIndexes:   *noIndexes,
 	}
 
 	printBanner(cfg)
@@ -87,11 +90,30 @@ func main() {
 	fmt.Println("OK")
 
 	// -----------------------------------------------------------------------
+	// Step 1b: Detect cluster leader for write routing.
+	// -----------------------------------------------------------------------
+	if cfg.WriteTarget == "" && len(cfg.Targets) > 1 {
+		leader := detectLeader(cfg.Targets)
+		if leader != "" {
+			cfg.WriteTarget = leader
+			fmt.Printf("Leader detected: %s (writes go directly to leader)\n", leader)
+		} else {
+			fmt.Println("No leader detected (standalone mode?) — writes round-robin across all targets")
+		}
+	}
+
+	// -----------------------------------------------------------------------
 	// Step 2: Create indexes (unless -no-indexes).
 	// -----------------------------------------------------------------------
+	// Use the write target (leader) for index creation and seeding.
+	seedTarget := cfg.WriteTarget
+	if seedTarget == "" {
+		seedTarget = cfg.Targets[0]
+	}
+
 	if !cfg.NoIndexes {
 		fmt.Print("Creating indexes (name, city)... ")
-		if err := createIndexes(cfg.Targets[0]); err != nil {
+		if err := createIndexes(seedTarget); err != nil {
 			fmt.Fprintf(os.Stderr, "\nERROR creating indexes: %v\n", err)
 			os.Exit(1)
 		}
@@ -107,12 +129,12 @@ func main() {
 	fmt.Printf("Seeding %d nodes + %d edges... ", cfg.SeedNodes, cfg.SeedEdges)
 
 	sCtx, sCancel := context.WithTimeout(context.Background(), 60*time.Second)
-	if err := seedNodes(sCtx, cfg.Targets[0], cfg.SeedNodes, registry); err != nil {
+	if err := seedNodes(sCtx, seedTarget, cfg.SeedNodes, registry); err != nil {
 		sCancel()
 		fmt.Fprintf(os.Stderr, "\nERROR seeding nodes: %v\n", err)
 		os.Exit(1)
 	}
-	if err := seedEdges(sCtx, cfg.Targets[0], cfg.SeedEdges, registry); err != nil {
+	if err := seedEdges(sCtx, seedTarget, cfg.SeedEdges, registry); err != nil {
 		sCancel()
 		fmt.Fprintf(os.Stderr, "\nERROR seeding edges: %v\n", err)
 		os.Exit(1)
@@ -126,7 +148,16 @@ func main() {
 	collector := NewCollector(100_000)
 	collector.Start()
 
-	rotator := NewTargetRotator(cfg.Targets)
+	readRotator := NewTargetRotator(cfg.Targets)
+
+	// Write rotator: if a write target is known (leader), send all writes there.
+	// Otherwise, round-robin like reads (relies on follower → leader forwarding).
+	var writeRotator *TargetRotator
+	if cfg.WriteTarget != "" {
+		writeRotator = NewTargetRotator([]string{cfg.WriteTarget})
+	} else {
+		writeRotator = NewTargetRotator(cfg.Targets)
+	}
 
 	// Handle Ctrl+C gracefully.
 	sigCh := make(chan os.Signal, 1)
@@ -141,7 +172,7 @@ func main() {
 			warmupWg.Add(1)
 			go func(id int) {
 				defer warmupWg.Done()
-				runWriteWorker(warmupCtx, id, rotator, registry, collector, true)
+				runWriteWorker(warmupCtx, id, writeRotator, registry, collector, true)
 			}(i)
 		}
 
@@ -172,30 +203,42 @@ func main() {
 
 	var benchWg sync.WaitGroup
 
-	// Start write workers.
+	// Start write workers — send writes directly to the leader.
 	for i := 0; i < cfg.Writers; i++ {
 		benchWg.Add(1)
 		go func(id int) {
 			defer benchWg.Done()
-			runWriteWorker(benchCtx, id, rotator, registry, collector, false)
+			runWriteWorker(benchCtx, id, writeRotator, registry, collector, false)
 		}(i)
 	}
 
-	// Start read workers.
+	// Start read workers — distribute reads across all nodes.
 	for i := 0; i < cfg.Readers; i++ {
 		benchWg.Add(1)
 		go func(id int) {
 			defer benchWg.Done()
-			runReadWorker(benchCtx, id, rotator, registry, collector)
+			runReadWorker(benchCtx, id, readRotator, registry, collector)
 		}(i)
 	}
 
 	// Start replication lag probe (if enabled and multiple targets).
 	if cfg.RepProbe && len(cfg.Targets) > 1 {
+		// Build probe targets: leader first, then followers.
+		var probeTargets []string
+		if cfg.WriteTarget != "" {
+			probeTargets = append(probeTargets, cfg.WriteTarget)
+			for _, t := range cfg.Targets {
+				if t != cfg.WriteTarget {
+					probeTargets = append(probeTargets, t)
+				}
+			}
+		} else {
+			probeTargets = cfg.Targets
+		}
 		benchWg.Add(1)
 		go func() {
 			defer benchWg.Done()
-			runReplicationProbe(benchCtx, cfg.Targets, collector, 2*time.Second)
+			runReplicationProbe(benchCtx, probeTargets, collector, 2*time.Second)
 		}()
 	}
 
@@ -250,6 +293,9 @@ func printBanner(cfg BenchConfig) {
 	fmt.Println("╚═══════════════════════════════════════════════════════════╝")
 	fmt.Println()
 	fmt.Printf("  Targets  : %s\n", strings.Join(cfg.Targets, ", "))
+	if cfg.WriteTarget != "" {
+		fmt.Printf("  WriteTo  : %s (direct to leader)\n", cfg.WriteTarget)
+	}
 	fmt.Printf("  Duration : %s\n", cfg.Duration)
 	fmt.Printf("  Writers  : %d goroutines\n", cfg.Writers)
 	fmt.Printf("  Readers  : %d goroutines\n", cfg.Readers)
