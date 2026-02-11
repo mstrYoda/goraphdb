@@ -160,6 +160,10 @@ func StartCluster(db *graphdb.DB, cfg ClusterConfig) (*ClusterManager, error) {
 	for _, p := range cfg.Peers {
 		peerGRPCAddrs[p.ID] = p.GRPCAddr
 		peerHTTPAddrs[p.ID] = p.HTTPAddr
+		// Skip self — the election bootstrap already adds the current node.
+		if p.ID == cfg.NodeID {
+			continue
+		}
 		raftPeers = append(raftPeers, PeerConfig{ID: p.ID, Addr: p.RaftAddr})
 	}
 
