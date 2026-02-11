@@ -71,19 +71,19 @@ func (m *Metrics) recordQueryDuration(d time.Duration) {
 // Snapshot returns a point-in-time copy of all metrics as a map.
 func (m *Metrics) Snapshot() map[string]any {
 	snap := map[string]any{
-		"queries_total":       m.QueriesTotal.Load(),
-		"slow_queries_total":  m.SlowQueries.Load(),
-		"query_errors_total":  m.QueryErrorTotal.Load(),
+		"queries_total":         m.QueriesTotal.Load(),
+		"slow_queries_total":    m.SlowQueries.Load(),
+		"query_errors_total":    m.QueryErrorTotal.Load(),
 		"query_duration_sum_us": m.QueryDurationSum.Load(),
 		"query_duration_max_us": m.QueryDurationMax.Load(),
-		"cache_hits_total":    m.CacheHits.Load(),
-		"cache_misses_total":  m.CacheMisses.Load(),
-		"nodes_created_total": m.NodesCreated.Load(),
-		"nodes_deleted_total": m.NodesDeleted.Load(),
-		"edges_created_total": m.EdgesCreated.Load(),
-		"edges_deleted_total": m.EdgesDeleted.Load(),
-		"index_lookups_total":     m.IndexLookups.Load(),
-		"bloom_negatives_total":   m.BloomNegatives.Load(),
+		"cache_hits_total":      m.CacheHits.Load(),
+		"cache_misses_total":    m.CacheMisses.Load(),
+		"nodes_created_total":   m.NodesCreated.Load(),
+		"nodes_deleted_total":   m.NodesDeleted.Load(),
+		"edges_created_total":   m.EdgesCreated.Load(),
+		"edges_deleted_total":   m.EdgesDeleted.Load(),
+		"index_lookups_total":   m.IndexLookups.Load(),
+		"bloom_negatives_total": m.BloomNegatives.Load(),
 	}
 
 	// Pull live gauges from DB.
