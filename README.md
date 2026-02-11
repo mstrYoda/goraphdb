@@ -15,7 +15,9 @@ A high-performance, embeddable graph database written in Go. Built on top of [bb
 - **Fluent query builder** — chainable Go API with filtering, pagination, and direction control
 - **Secondary indexes** — O(log N) property lookups with auto-maintenance on single writes
 - **Composite indexes** — multi-property indexes for fast compound lookups (`CreateCompositeIndex("city", "age")`)
-- **Cypher query language** — read and write support with index-aware execution, LIMIT push-down, ORDER BY + LIMIT heap, query plan caching, `OPTIONAL MATCH`, `EXPLAIN`/`PROFILE`, parameterized queries, and `CREATE` for inserting nodes and edges
+- **Unique constraints** — `CreateUniqueConstraint(label, property)` enforces value uniqueness across nodes with the same label; O(1) lookup via dedicated `idx_unique` bucket; WAL-replicated to followers
+- **Bloom filter for HasEdge()** — in-memory probabilistic filter (~1.5 % false positive rate, zero false negatives) avoids disk I/O when edges definitely don't exist; rebuilt from `adj_out` on startup; `graphdb_bloom_negatives_total` Prometheus counter tracks savings
+- **Cypher query language** — read and write support with index-aware execution, LIMIT push-down, ORDER BY + LIMIT heap, query plan caching, `OPTIONAL MATCH`, `EXPLAIN`/`PROFILE`, parameterized queries, `CREATE` for inserting nodes/edges, and `MERGE` for upsert (match-or-create) semantics with `ON CREATE SET` / `ON MATCH SET`
 - **Query timeout** — `CypherContext`/`CypherWithParamsContext` accept `context.Context` for deadline-based cancellation at scan loop boundaries
 - **Transactions** — `Begin`/`Commit`/`Rollback` API for multi-statement atomic operations with read-your-writes semantics
 - **EXPLAIN / PROFILE** — query plan tree with operator types; `PROFILE` adds per-operator row counts and wall-clock timing
@@ -37,6 +39,8 @@ A high-performance, embeddable graph database written in Go. Built on top of [bb
 - **Transparent write forwarding** — followers automatically forward writes to the leader via HTTP; clients can connect to any node
 - **Health check endpoint** — `GET /api/health` returns role-aware status (leader/follower/standalone) for load balancer integration
 - **Cluster status endpoint** — `GET /api/cluster` exposes node ID, role, leader ID, and cluster topology
+- **Cluster dashboard** — React UI page showing per-node stats, role indicators, replication progress bars, and health status with 5-second auto-refresh; aggregator endpoint proxies to all peers
+- **Graceful shutdown** — `SIGTERM`/`SIGINT` signal handler with ordered teardown: HTTP drain (10 s) → Raft/gRPC stop → WAL flush → bbolt close; safe for Kubernetes pod termination and `Ctrl+C`
 - **Management UI** — built-in web console with a Cypher query editor, interactive graph visualization (cytoscape.js), index management, and a node/edge explorer
 
 ## Installation
@@ -286,6 +290,50 @@ indexes := db.ListCompositeIndexes() // [][]string
 err = db.DropCompositeIndex("city", "age")
 ```
 
+### Unique Constraints
+
+```go
+// Create a unique constraint: no two :Person nodes may share the same email.
+err := db.CreateUniqueConstraint("Person", "email")
+
+// Attempting to create a duplicate will fail.
+_, _ = db.AddNodeWithLabels([]string{"Person"}, graphdb.Props{"email": "alice@example.com"})
+_, err = db.AddNodeWithLabels([]string{"Person"}, graphdb.Props{"email": "alice@example.com"})
+// err == graphdb.ErrUniqueConstraintViolation
+
+// Fast O(1) lookup by unique constraint.
+node, err := db.FindByUniqueConstraint("Person", "email", "alice@example.com")
+
+// List all constraints.
+constraints := db.ListUniqueConstraints() // []UniqueConstraint{{Label:"Person", Property:"email"}}
+
+// Drop a constraint (existing duplicates are not retroactively checked).
+err = db.DropUniqueConstraint("Person", "email")
+```
+
+Unique constraints are enforced during `AddNodeWithLabels`, `UpdateNode`, `SetNodeProps`, and `AddLabel`. Deleting a node frees its slot. Constraints are persisted in the `unique_meta` bucket and replicated via WAL.
+
+### Cypher MERGE (Upsert)
+
+```go
+ctx := context.Background()
+
+// MERGE: match-or-create. If a :Person with name "Alice" exists, match it;
+// otherwise create it.
+res, _ := db.Cypher(ctx, `MERGE (n:Person {name: "Alice"})`)
+
+// ON CREATE SET — properties applied only when a new node is created.
+res, _ = db.Cypher(ctx, `MERGE (n:Person {name: "Bob"}) ON CREATE SET n.created = "2026"`)
+
+// ON MATCH SET — properties applied only when an existing node is matched.
+res, _ = db.Cypher(ctx, `MERGE (n:Person {name: "Alice"}) ON MATCH SET n.updated = "2026"`)
+
+// RETURN — returns the merged node.
+res, _ = db.Cypher(ctx, `MERGE (n:Person {name: "Eve"}) ON CREATE SET n.role = "admin" RETURN n`)
+```
+
+> **Tip**: Combine `MERGE` with a unique constraint on the same `(label, property)` for efficient O(1) upsert instead of a full label scan.
+
 ### Prepared Statements & Query Cache
 
 ```go
@@ -430,7 +478,7 @@ m.WritePrometheus(os.Stdout)
 ```
 
 Available metrics:
-- **Counters**: `graphdb_queries_total`, `graphdb_slow_queries_total`, `graphdb_query_errors_total`, `graphdb_cache_hits_total`, `graphdb_cache_misses_total`, `graphdb_nodes_created_total`, `graphdb_nodes_deleted_total`, `graphdb_edges_created_total`, `graphdb_edges_deleted_total`, `graphdb_index_lookups_total`
+- **Counters**: `graphdb_queries_total`, `graphdb_slow_queries_total`, `graphdb_query_errors_total`, `graphdb_cache_hits_total`, `graphdb_cache_misses_total`, `graphdb_nodes_created_total`, `graphdb_nodes_deleted_total`, `graphdb_edges_created_total`, `graphdb_edges_deleted_total`, `graphdb_index_lookups_total`, `graphdb_bloom_negatives_total`
 - **Gauges**: `graphdb_nodes_current`, `graphdb_edges_current`, `graphdb_node_cache_bytes_used`, `graphdb_node_cache_budget_bytes`, `graphdb_query_cache_entries`, `graphdb_query_cache_capacity`
 
 ### Fluent Query Builder
@@ -668,7 +716,7 @@ Roles can be changed at runtime via `db.SetRole("leader")` — used by the Raft 
 
 - **Segment files**: `wal-0000000000.log`, `wal-0000000001.log`, …
 - **Rotation**: new segment at 64 MB
-- **16 operation types**: AddNode, AddNodeBatch, UpdateNode, SetNodeProps, DeleteNode, AddEdge, AddEdgeBatch, DeleteEdge, UpdateEdge, AddNodeWithLabels, AddLabel, RemoveLabel, CreateIndex, DropIndex, CreateCompositeIndex, DropCompositeIndex
+- **18 operation types**: AddNode, AddNodeBatch, UpdateNode, SetNodeProps, DeleteNode, AddEdge, AddEdgeBatch, DeleteEdge, UpdateEdge, AddNodeWithLabels, AddLabel, RemoveLabel, CreateIndex, DropIndex, CreateCompositeIndex, DropCompositeIndex, CreateUniqueConstraint, DropUniqueConstraint
 - **Tailing**: WALReader supports live tailing — returns `io.EOF` at the end of the active segment, resumes on next call when new data is appended
 
 ### Write Forwarding
@@ -715,8 +763,12 @@ Clients can connect to **any node** — reads are served locally, writes are tra
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/api/health` | GET | Load balancer health probe. Returns `200` with `role` for routing. Returns `503` if DB is down or no leader elected. |
-| `/api/cluster` | GET | Cluster topology: node ID, role (leader/follower), current leader ID, DB role. |
+| `/api/health` | GET | Load balancer health probe. Returns `200` with `role` for routing; returns `200` with `status: "readonly"` on quorum loss (stale reads). |
+| `/api/cluster` | GET | Cluster topology: node ID, role (leader/follower), current leader ID, DB role, addresses, LSN. |
+| `/api/cluster/nodes` | GET | Aggregated view of all cluster nodes — proxies to each peer's health, stats, metrics, and cluster endpoints. |
+| `/api/constraints` | GET | List all unique constraints. |
+| `/api/constraints` | POST | Create a unique constraint (`{"label": "...", "property": "..."}`). |
+| `/api/constraints` | DELETE | Drop a unique constraint (`{"label": "...", "property": "..."}`). |
 
 ## Architecture
 
@@ -751,7 +803,7 @@ Clients can connect to **any node** — reads are served locally, writes are tra
 │   bbolt (B+tree) · Memory-mapped files · MVCC               │
 │   MessagePack encoding · CRC32 checksums · Labels index      │
 ├──────────────────────────────────────────────────────────────┤
-│  nodes│edges│adj_*│idx_prop│idx_edge_type│node_labels│idx_lbl│
+│ nodes│edges│adj_*│idx_prop│idx_edge│labels│idx_lbl│idx_uniq│
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -767,6 +819,8 @@ Clients can connect to **any node** — reads are served locally, writes are tra
 | `idx_edge_type` | `"label" \| edgeID` | ∅ | Edge type index |
 | `node_labels` | `uint64 nodeID` | MessagePack `[]string` | Node label storage |
 | `idx_node_label` | `"label" \| nodeID` | ∅ | Label → node index |
+| `idx_unique` | `"label\0property\0value"` | `uint64 nodeID` | Unique constraint value index |
+| `unique_meta` | `"label\0property"` | ∅ | Unique constraint metadata |
 | `meta` | `"node_counter"` / `"edge_counter"` | `uint64` | ID allocation counters |
 
 ### Concurrency Model
@@ -869,6 +923,13 @@ curl -X POST http://localhost:7474/api/cypher/execute \
 curl -X POST http://localhost:7474/api/cypher/stream \
   -d '{"query": "MATCH (n) RETURN n.name LIMIT 100"}'
 
+# Unique constraints
+curl http://localhost:7474/api/constraints
+curl -X POST http://localhost:7474/api/constraints \
+  -d '{"label": "Person", "property": "email"}'
+curl -X DELETE http://localhost:7474/api/constraints \
+  -d '{"label": "Person", "property": "email"}'
+
 # Prometheus metrics
 curl http://localhost:7474/metrics
 
@@ -958,14 +1019,14 @@ go test -bench=. -benchmem # benchmarks
 ### Phase 1 — Foundation
 - [ ] **Hot Backup / Restore** — consistent snapshot using bbolt's built-in `WriteTo`, zero downtime
 - [x] **Write-Ahead Log (WAL)** — append-only segmented log (64 MB segments, CRC32, msgpack) with WALReader tailing support
-- [x] **Write Cypher** — `CREATE` support in the Cypher engine
+- [x] **Write Cypher** — `CREATE`, `MERGE` (upsert) support in the Cypher engine
 - [x] **Prometheus Metrics** — atomic counters with Prometheus text exposition
 
 ### Phase 2 — Replication & Reliability
-- [x] **Single-Leader Replication** — WAL → gRPC log shipping → follower Applier pipeline with 16 operation types
+- [x] **Single-Leader Replication** — WAL → gRPC log shipping → follower Applier pipeline with 18 operation types
 - [x] **Leader Election** — hashicorp/raft integration for automatic failover with dynamic role switching
 - [x] **Query Router** — read/write routing with HTTP write forwarding from followers to leader
-- [x] **Read-Only Replicas** — `writeGuard` on all 16 public write methods, `ErrReadOnlyReplica` sentinel
+- [x] **Read-Only Replicas** — `writeGuard` on all public write methods, `ErrReadOnlyReplica` sentinel
 - [x] **Health Check Endpoint** — `GET /api/health` with role-aware responses for load balancer routing
 - [x] **Cluster Status Endpoint** — `GET /api/cluster` for topology introspection (node ID, role, leader)
 - [ ] **Point-in-Time Recovery** — replay WAL from a backup snapshot to restore data to any past timestamp
@@ -979,14 +1040,15 @@ go test -bench=. -benchmem # benchmarks
 - [ ] **Distributed Query Coordinator** — route Cypher queries to the correct node(s), scatter-gather for cross-shard queries, merge results
 - [ ] **Distributed Edge Writes** — two-phase commit for edges that span different cluster nodes
 - [ ] **Shard Rebalancing & Migration** — move shards between nodes when a node joins or leaves the cluster
-- [ ] **Cluster-Aware UI** — topology view, per-node stats, shard distribution map, leader/follower status
+- [x] **Cluster-Aware UI** — React cluster dashboard with per-node stats, role indicators, replication progress bars, health status; auto-refresh 5s; aggregator endpoint proxies to all peers
 
 ### Phase 4 — Production Hardening
 - [ ] **Range Indexes** — B+tree range scans for numerical/date properties (`WHERE n.age > 25` without full scan)
 - [ ] **Graph Partitioning** — smarter shard placement (METIS/Fennel) to minimize cross-shard edges
-- [ ] **Bloom Filters** — fast `HasEdge()` checks without touching disk
-- [ ] **Schema Constraints** — unique properties, required fields, edge cardinality rules
+- [x] **Bloom Filters** — in-memory probabilistic filter for fast `HasEdge()` checks (~1.5% FPR, zero false negatives); rebuilt from `adj_out` on startup; ~1 byte per edge
+- [x] **Unique Constraints** — `CreateUniqueConstraint(label, property)` with O(1) lookup via `idx_unique` bucket; enforced on all write paths; WAL-replicated; Cypher `MERGE` uses constraints for efficient upsert
 - [x] **Query Timeout & Cancellation** — context-based cancellation for long-running queries
+- [x] **Graceful Shutdown** — SIGTERM/SIGINT handler with ordered teardown: HTTP drain (10s) → Raft/gRPC stop → WAL flush → bbolt close
 - [ ] **Connection Pooling & Rate Limiting** — protect against runaway queries in multi-tenant setups
 
 ## License
