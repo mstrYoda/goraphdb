@@ -185,13 +185,20 @@ type Options struct {
 }
 
 // DefaultOptions returns sensible defaults for a ~50GB graph database.
+//
+// NoSync defaults to true for high write throughput: per-transaction fdatasync
+// is disabled, and a background goroutine syncs each shard every 200ms.
+// This means at most 200ms of committed writes may be lost on an unclean
+// shutdown (power failure, OOM-kill). In cluster mode, the WAL provides
+// additional durability (fsync every 2ms). Set NoSync=false if you need
+// per-transaction durability at the cost of ~20x lower write throughput.
 func DefaultOptions() Options {
 	return Options{
 		ShardCount:         1,
 		WorkerPoolSize:     8,
 		CacheBudget:        128 * 1024 * 1024, // 128MB
 		SlowQueryThreshold: 100 * time.Millisecond,
-		NoSync:             false,
+		NoSync:             true,
 		ReadOnly:           false,
 		MmapSize:           256 * 1024 * 1024, // 256MB initial mmap
 	}

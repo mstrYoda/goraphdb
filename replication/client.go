@@ -232,9 +232,9 @@ func (c *Client) streamOnce(ctx context.Context) error {
 
 	// Error collection: first error wins.
 	var (
-		applyErr  error
-		errOnce   sync.Once
-		workerWg  sync.WaitGroup
+		applyErr error
+		errOnce  sync.Once
+		workerWg sync.WaitGroup
 	)
 
 	// Start apply workers.

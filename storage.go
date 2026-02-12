@@ -59,6 +59,12 @@ var allBuckets = [][]byte{
 	bucketUniqueMeta,
 }
 
+// shardSyncInterval is how often the background goroutine calls db.Sync()
+// when NoSync is enabled. At most this much committed data may be lost on
+// an unclean shutdown (power failure, SIGKILL). 200ms is a good balance
+// between durability and throughput — comparable to MongoDB's journal interval.
+const shardSyncInterval = 200 * time.Millisecond
+
 // shard represents a single bbolt database file (a partition of the graph).
 type shard struct {
 	db   *bolt.DB
@@ -78,6 +84,11 @@ type shard struct {
 	// get ErrWriteQueueFull if the queue is full and their deadline expires.
 	writeSem     chan struct{}
 	writeTimeout time.Duration // max wait time for a write slot; 0 = block forever
+
+	// Background sync for NoSync mode. When per-tx fdatasync is disabled,
+	// a goroutine periodically calls db.Sync() to flush dirty pages to disk.
+	stopSync chan struct{} // closed to signal background sync to stop (nil if NoSync=false)
+	syncDone chan struct{} // closed when background sync goroutine exits
 }
 
 // openShard opens or creates a bbolt database file at the given path.
@@ -97,6 +108,16 @@ func openShard(path string, opts Options) (*shard, error) {
 	db, err := bolt.Open(path, 0600, boltOpts)
 	if err != nil {
 		return nil, fmt.Errorf("graphdb: failed to open bolt db at %s: %w", path, err)
+	}
+
+	// When NoSync is enabled, per-transaction fdatasync is disabled.
+	// Set MaxBatchDelay=0 so Batch() fires immediately instead of waiting
+	// the default 10ms to collect concurrent callers. Natural batching
+	// still occurs for truly concurrent writers arriving in the same ~µs
+	// window. Without this, each write pays a 10ms artificial delay even
+	// though there's no fsync to amortize.
+	if opts.NoSync {
+		db.MaxBatchDelay = 0
 	}
 
 	// Default write queue: 64 slots. This allows up to 64 goroutines to
@@ -125,6 +146,14 @@ func openShard(path string, opts Options) (*shard, error) {
 	if err := s.loadCounters(); err != nil {
 		db.Close()
 		return nil, err
+	}
+
+	// Start background sync goroutine for NoSync mode.
+	// This is the ONLY place where fdatasync happens when NoSync=true.
+	if opts.NoSync && !opts.ReadOnly {
+		s.stopSync = make(chan struct{})
+		s.syncDone = make(chan struct{})
+		go s.backgroundSync()
 	}
 
 	return s, nil
@@ -263,12 +292,10 @@ func (s *shard) releaseWrite() {
 // writeUpdate is a convenience wrapper that acquires the write semaphore,
 // executes a bbolt Batch transaction, and releases the semaphore.
 //
-// bbolt Batch() groups concurrent callers into a single underlying
-// transaction with a single fsync — amortizing disk I/O across all
-// grouped writers. This is critical for write throughput: without it,
-// each writer pays a full fsync (~25 ms on macOS), serializing all
-// writers to ~38 ops/s with 1 shard. With Batch(), 16 concurrent
-// writers share a single fsync, yielding ~500+ ops/s.
+// With NoSync=true (default), MaxBatchDelay=0 so Batch() fires immediately.
+// Concurrent callers that arrive in the same microsecond window are still
+// naturally grouped into a single transaction. Without NoSync, the default
+// MaxBatchDelay=10ms groups writers to amortize fdatasync across the batch.
 //
 // Caveat: if any function in a batch fails, the entire batch is rolled
 // back and each function is retried individually via Update(). This
@@ -324,13 +351,42 @@ func (s *shard) persistCounters(tx *bolt.Tx) error {
 	return nil
 }
 
+// backgroundSync periodically calls db.Sync() to flush dirty pages to disk.
+// Only runs when NoSync=true (per-tx fdatasync disabled). The goroutine exits
+// when stopSync is closed, performing one final sync before returning.
+func (s *shard) backgroundSync() {
+	defer close(s.syncDone)
+	ticker := time.NewTicker(shardSyncInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.stopSync:
+			// Final sync before exit — ensures all committed data reaches disk.
+			_ = s.db.Sync()
+			return
+		case <-ticker.C:
+			_ = s.db.Sync()
+		}
+	}
+}
+
 // close closes the bbolt database.
 func (s *shard) close() error {
+	// Stop background sync goroutine first (if running).
+	// This triggers a final db.Sync() inside the goroutine.
+	if s.stopSync != nil {
+		close(s.stopSync)
+		<-s.syncDone // wait for final sync to complete
+	}
+
 	// Persist final counter state.
 	if !s.db.IsReadOnly() {
 		_ = s.db.Update(func(tx *bolt.Tx) error {
 			return s.persistCounters(tx)
 		})
+		// Sync the counter update to disk (background sync is already stopped).
+		_ = s.db.Sync()
 	}
 	return s.db.Close()
 }
