@@ -69,7 +69,7 @@ func (a *Applier) ResetLSN() {
 	a.appliedLSN.Store(0)
 }
 
-// Apply replays a single WAL entry on the follower's database.
+// Apply replays a single WAL entry on the follower's database (sequential).
 // Entries must be applied in LSN order. Returns an error if the entry
 // cannot be applied (e.g., corrupted payload). Skips entries that have
 // already been applied (LSN <= appliedLSN).
@@ -79,6 +79,34 @@ func (a *Applier) Apply(entry *WALEntry) error {
 		return nil
 	}
 
+	if err := a.applyOp(entry); err != nil {
+		return err
+	}
+
+	a.appliedLSN.Store(entry.LSN)
+	return nil
+}
+
+// ApplyOp executes a single WAL entry without LSN tracking.
+// This is designed for the concurrent pipeline in the replication client:
+// multiple goroutines call ApplyOp() concurrently, and bbolt Batch()
+// groups their writes into a single fsync. The caller is responsible for
+// tracking applied LSNs (see lsnTracker in client.go).
+//
+// Thread safety: safe for concurrent use — each applyXxx method uses
+// writeUpdate → bbolt Batch() which handles synchronization internally.
+func (a *Applier) ApplyOp(entry *WALEntry) error {
+	return a.applyOp(entry)
+}
+
+// SetAppliedLSN sets the contiguous applied LSN. Called by the client's
+// LSN tracker when all entries up to lsn have been applied.
+func (a *Applier) SetAppliedLSN(lsn uint64) {
+	a.appliedLSN.Store(lsn)
+}
+
+// applyOp dispatches a single WAL entry to the appropriate handler.
+func (a *Applier) applyOp(entry *WALEntry) error {
 	var err error
 	switch entry.Op {
 	case OpAddNode:
@@ -124,8 +152,6 @@ func (a *Applier) Apply(entry *WALEntry) error {
 	if err != nil {
 		return fmt.Errorf("applier: failed to apply LSN %d (%s): %w", entry.LSN, entry.Op, err)
 	}
-
-	a.appliedLSN.Store(entry.LSN)
 	return nil
 }
 

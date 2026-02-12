@@ -74,12 +74,12 @@ func (db *DB) AddEdge(from, to NodeID, label string, props Props) (EdgeID, error
 				return err
 			}
 
-		// Edge type index.
-		if err := tx.Bucket(bucketIdxEdgeTyp).Put(
-			encodeIndexKey(label, uint64(id)), nil,
-		); err != nil {
-			return err
-		}
+			// Edge type index.
+			if err := tx.Bucket(bucketIdxEdgeTyp).Put(
+				encodeIndexKey(label, uint64(id)), nil,
+			); err != nil {
+				return err
+			}
 
 			return nil
 		})
