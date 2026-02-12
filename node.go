@@ -40,13 +40,15 @@ func (db *DB) AddNode(props Props) (NodeID, error) {
 		if err := db.indexNodeProps(tx, id, props); err != nil {
 			return err
 		}
-		target.nodeCount.Add(1)
 		return nil
 	})
 	if err != nil {
 		db.log.Error("failed to add node", "error", err)
 		return 0, fmt.Errorf("graphdb: failed to add node: %w", err)
 	}
+	// Increment counter after successful commit (outside batch fn to avoid
+	// double-counting if bbolt Batch retries the function on rollback).
+	target.nodeCount.Add(1)
 
 	// WAL: log the committed mutation for replication.
 	db.walAppend(OpAddNode, WALAddNode{ID: id, Props: props})
@@ -96,9 +98,11 @@ func (db *DB) AddNodeBatch(propsList []Props) ([]NodeID, error) {
 					return err
 				}
 			}
-			s.nodeCount.Add(uint64(len(propsList)))
 			return nil
 		})
+		if err == nil {
+			s.nodeCount.Add(uint64(len(propsList)))
+		}
 		if err != nil {
 			db.log.Error("batch add failed", "count", len(propsList), "error", err)
 			return nil, fmt.Errorf("graphdb: batch add failed: %w", err)
@@ -148,12 +152,12 @@ func (db *DB) AddNodeBatch(propsList []Props) ([]NodeID, error) {
 					return err
 				}
 			}
-			target.nodeCount.Add(uint64(len(entries)))
 			return nil
 		})
 		if err != nil {
 			return nil, fmt.Errorf("graphdb: batch add failed on shard %d: %w", shardIdx, err)
 		}
+		target.nodeCount.Add(uint64(len(entries)))
 	}
 
 	// WAL: log the batch as a single entry.
@@ -407,12 +411,12 @@ func (db *DB) DeleteNode(id NodeID) error {
 		if err := b.Delete(key); err != nil {
 			return err
 		}
-		s.nodeCount.Add(^uint64(0)) // decrement by 1
 		return nil
 	})
 	if err != nil {
 		db.log.Error("failed to delete node", "id", id, "error", err)
 	} else {
+		s.nodeCount.Add(^uint64(0)) // decrement by 1
 		db.walAppend(OpDeleteNode, WALDeleteNode{ID: id})
 		db.ncache.Invalidate(id)
 		if db.metrics != nil {

@@ -74,20 +74,20 @@ func (db *DB) AddEdge(from, to NodeID, label string, props Props) (EdgeID, error
 				return err
 			}
 
-			// Edge type index.
-			if err := tx.Bucket(bucketIdxEdgeTyp).Put(
-				encodeIndexKey(label, uint64(id)), nil,
-			); err != nil {
-				return err
-			}
+		// Edge type index.
+		if err := tx.Bucket(bucketIdxEdgeTyp).Put(
+			encodeIndexKey(label, uint64(id)), nil,
+		); err != nil {
+			return err
+		}
 
-			srcShard.edgeCount.Add(1)
 			return nil
 		})
 		if err != nil {
 			db.log.Error("failed to add edge", "from", from, "to", to, "label", label, "error", err)
 			return 0, fmt.Errorf("graphdb: failed to add edge: %w", err)
 		}
+		srcShard.edgeCount.Add(1)
 		db.walAppend(OpAddEdge, WALAddEdge{ID: id, From: from, To: to, Label: label, Props: props})
 		if db.edgeBloom != nil {
 			db.edgeBloom.Add(from, to)
@@ -119,12 +119,12 @@ func (db *DB) AddEdge(from, to NodeID, label string, props Props) (EdgeID, error
 		); err != nil {
 			return err
 		}
-		srcShard.edgeCount.Add(1)
 		return nil
 	})
 	if err != nil {
 		return 0, fmt.Errorf("graphdb: failed to add edge (source shard): %w", err)
 	}
+	srcShard.edgeCount.Add(1)
 
 	// 2) adj_in in target shard.
 	err = dstShard.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
@@ -205,12 +205,12 @@ func (db *DB) AddEdgeBatch(edges []Edge) ([]EdgeID, error) {
 				}
 			}
 
-			s.edgeCount.Add(uint64(len(edges)))
 			return nil
 		})
 		if err != nil {
 			return nil, fmt.Errorf("graphdb: batch edge add failed: %w", err)
 		}
+		s.edgeCount.Add(uint64(len(edges)))
 		// WAL: log the batch.
 		walEdges := make([]WALBatchEdge, len(edges))
 		for i, e := range edges {
@@ -276,12 +276,12 @@ func (db *DB) AddEdgeBatch(edges []Edge) ([]EdgeID, error) {
 					return err
 				}
 			}
-			s.edgeCount.Add(uint64(len(batch)))
 			return nil
 		})
 		if err != nil {
 			return nil, fmt.Errorf("graphdb: batch edge add failed: %w", err)
 		}
+		s.edgeCount.Add(uint64(len(batch)))
 	}
 
 	// Step 2: write adj_in entries per destination shard.
@@ -398,12 +398,12 @@ func (db *DB) deleteEdgeInternal(edge *Edge) error {
 		if err := tx.Bucket(bucketIdxEdgeTyp).Delete(encodeIndexKey(edge.Label, uint64(edge.ID))); err != nil {
 			return err
 		}
-		srcShard.edgeCount.Add(^uint64(0)) // decrement
 		return nil
 	})
 	if err != nil {
 		return err
 	}
+	srcShard.edgeCount.Add(^uint64(0)) // decrement
 
 	// 2) Remove adj_in from target shard.
 	var adjErr error

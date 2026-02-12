@@ -64,13 +64,13 @@ func (db *DB) AddNodeWithLabels(labels []string, props Props) (NodeID, error) {
 		if err := db.indexUniqueConstraints(tx, id, labels, props); err != nil {
 			return err
 		}
-		target.nodeCount.Add(1)
 		return nil
 	})
 	if err != nil {
 		db.log.Error("failed to add node with labels", "error", err)
 		return 0, fmt.Errorf("graphdb: failed to add node: %w", err)
 	}
+	target.nodeCount.Add(1)
 
 	db.walAppend(OpAddNodeWithLabels, WALAddNodeWithLabels{ID: id, Labels: labels, Props: props})
 	db.ncache.Put(&Node{ID: id, Labels: labels, Props: props})

@@ -148,16 +148,19 @@ func (a *Applier) applyAddNode(payload []byte) error {
 		return err
 	}
 
-	return target.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
+	err = target.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
 		if err := tx.Bucket(bucketNodes).Put(encodeNodeID(p.ID), data); err != nil {
 			return err
 		}
 		if err := a.db.indexNodeProps(tx, p.ID, p.Props); err != nil {
 			return err
 		}
-		target.nodeCount.Add(1)
 		return nil
 	})
+	if err == nil {
+		target.nodeCount.Add(1)
+	}
+	return err
 }
 
 func (a *Applier) applyAddNodeBatch(payload []byte) error {
@@ -190,12 +193,12 @@ func (a *Applier) applyAddNodeBatch(payload []byte) error {
 					return err
 				}
 			}
-			target.nodeCount.Add(uint64(len(entries)))
 			return nil
 		})
 		if err != nil {
 			return err
 		}
+		target.nodeCount.Add(uint64(len(entries)))
 	}
 	return nil
 }
@@ -274,7 +277,7 @@ func (a *Applier) applyDeleteNode(payload []byte) error {
 	}
 
 	s := a.db.shardFor(p.ID)
-	return s.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
+	err := s.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketNodes)
 		key := encodeNodeID(p.ID)
 
@@ -299,9 +302,12 @@ func (a *Applier) applyDeleteNode(payload []byte) error {
 		if err := b.Delete(key); err != nil {
 			return err
 		}
-		s.nodeCount.Add(^uint64(0))
 		return nil
 	})
+	if err == nil {
+		s.nodeCount.Add(^uint64(0))
+	}
+	return err
 }
 
 func (a *Applier) applyAddEdge(payload []byte) error {
@@ -315,7 +321,7 @@ func (a *Applier) applyAddEdge(payload []byte) error {
 	dstShard := a.db.shardFor(p.To)
 
 	if srcShard == dstShard {
-		return srcShard.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
+		err := srcShard.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
 			edgeData, err := encodeEdge(edge)
 			if err != nil {
 				return err
@@ -338,9 +344,12 @@ func (a *Applier) applyAddEdge(payload []byte) error {
 			); err != nil {
 				return err
 			}
-			srcShard.edgeCount.Add(1)
 			return nil
 		})
+		if err == nil {
+			srcShard.edgeCount.Add(1)
+		}
+		return err
 	}
 
 	// Cross-shard: two transactions.
@@ -362,12 +371,12 @@ func (a *Applier) applyAddEdge(payload []byte) error {
 		); err != nil {
 			return err
 		}
-		srcShard.edgeCount.Add(1)
 		return nil
 	})
 	if err != nil {
 		return err
 	}
+	srcShard.edgeCount.Add(1)
 
 	return dstShard.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketAdjIn).Put(
@@ -410,12 +419,12 @@ func (a *Applier) applyDeleteEdge(payload []byte) error {
 		_ = tx.Bucket(bucketEdges).Delete(encodeEdgeID(p.ID))
 		_ = tx.Bucket(bucketAdjOut).Delete(encodeAdjKey(p.From, p.ID))
 		_ = tx.Bucket(bucketIdxEdgeTyp).Delete(encodeIndexKey(p.Label, uint64(p.ID)))
-		srcShard.edgeCount.Add(^uint64(0))
 		return nil
 	})
 	if err != nil {
 		return err
 	}
+	srcShard.edgeCount.Add(^uint64(0))
 
 	return dstShard.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketAdjIn).Delete(encodeAdjKey(p.To, p.ID))
@@ -474,7 +483,7 @@ func (a *Applier) applyAddNodeWithLabels(payload []byte) error {
 		}
 	}
 
-	return target.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
+	err = target.writeUpdate(context.Background(), func(tx *bolt.Tx) error {
 		if err := tx.Bucket(bucketNodes).Put(encodeNodeID(p.ID), data); err != nil {
 			return err
 		}
@@ -492,9 +501,12 @@ func (a *Applier) applyAddNodeWithLabels(payload []byte) error {
 				}
 			}
 		}
-		target.nodeCount.Add(1)
 		return nil
 	})
+	if err == nil {
+		target.nodeCount.Add(1)
+	}
+	return err
 }
 
 func (a *Applier) applyAddLabel(payload []byte) error {

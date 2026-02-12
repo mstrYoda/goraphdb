@@ -67,9 +67,9 @@ import (
 // ---------------------------------------------------------------------------
 
 const (
-	walSegmentMaxSize    = 64 * 1024 * 1024  // 64MB per segment file
-	walFilePattern       = "wal-%010d.log"   // segment filename format
-	walFrameOverhead     = 4 + 4             // frameLen(4) + crc32(4) = 8 bytes per entry
+	walSegmentMaxSize    = 64 * 1024 * 1024     // 64MB per segment file
+	walFilePattern       = "wal-%010d.log"      // segment filename format
+	walFrameOverhead     = 4 + 4                // frameLen(4) + crc32(4) = 8 bytes per entry
 	walGroupCommitPeriod = 2 * time.Millisecond // how often the background goroutine fsyncs
 )
 
@@ -96,9 +96,9 @@ type WAL struct {
 	closed      bool
 
 	// Group commit: background fsync goroutine.
-	dirty   atomic.Bool   // true when there are unflushed writes
-	stopCh  chan struct{} // signals the sync goroutine to stop
-	doneCh  chan struct{} // closed when the sync goroutine exits
+	dirty  atomic.Bool   // true when there are unflushed writes
+	stopCh chan struct{} // signals the sync goroutine to stop
+	doneCh chan struct{} // closed when the sync goroutine exits
 }
 
 // OpenWAL opens or creates a WAL in the given directory.

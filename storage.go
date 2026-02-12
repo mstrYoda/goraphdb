@@ -261,9 +261,33 @@ func (s *shard) releaseWrite() {
 }
 
 // writeUpdate is a convenience wrapper that acquires the write semaphore,
-// executes a bbolt Update transaction, and releases the semaphore.
-// All public write methods should use this instead of calling s.db.Update directly.
+// executes a bbolt Batch transaction, and releases the semaphore.
+//
+// bbolt Batch() groups concurrent callers into a single underlying
+// transaction with a single fsync — amortizing disk I/O across all
+// grouped writers. This is critical for write throughput: without it,
+// each writer pays a full fsync (~25 ms on macOS), serializing all
+// writers to ~38 ops/s with 1 shard. With Batch(), 16 concurrent
+// writers share a single fsync, yielding ~500+ ops/s.
+//
+// Caveat: if any function in a batch fails, the entire batch is rolled
+// back and each function is retried individually via Update(). This
+// means fn may be called more than once — all operations inside fn
+// must be idempotent (bbolt Put/Delete are naturally idempotent).
+// Counter increments (nodeCount, edgeCount) should be done AFTER
+// writeUpdate returns successfully, not inside fn.
 func (s *shard) writeUpdate(ctx context.Context, fn func(tx *bolt.Tx) error) error {
+	if err := s.acquireWrite(ctx); err != nil {
+		return err
+	}
+	defer s.releaseWrite()
+	return s.db.Batch(fn)
+}
+
+// writeUpdateSingle is like writeUpdate but uses a dedicated bbolt
+// Update() transaction that is NOT batched. Use this for operations
+// that must run in isolation (e.g. bucket creation, compaction).
+func (s *shard) writeUpdateSingle(ctx context.Context, fn func(tx *bolt.Tx) error) error {
 	if err := s.acquireWrite(ctx); err != nil {
 		return err
 	}
