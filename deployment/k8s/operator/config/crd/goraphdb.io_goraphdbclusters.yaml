@@ -1,0 +1,291 @@
+# ============================================================================
+# GoraphDBCluster — Custom Resource Definition
+#
+# This CRD defines the GoraphDBCluster kind which the operator watches.
+# Install this before deploying the operator:
+#   kubectl apply -f config/crd/
+#
+# The CRD is cluster-scoped (GoraphDBCluster resources are namespaced).
+#
+# Generated from: api/v1alpha1/types.go
+# In production, use kubebuilder's controller-gen to auto-generate this.
+# ============================================================================
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: goraphdbclusters.goraphdb.io
+  annotations:
+    # Tracks which operator version generated this CRD schema.
+    goraphdb.io/operator-version: "v0.1.0"
+spec:
+  group: goraphdb.io
+  names:
+    kind: GoraphDBCluster
+    listKind: GoraphDBClusterList
+    plural: goraphdbclusters
+    singular: goraphdbcluster
+    # Short name: kubectl get gdb
+    shortNames:
+      - gdb
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      # Additional columns shown in `kubectl get gdb`
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+          description: Cluster lifecycle phase
+        - name: Ready
+          type: integer
+          jsonPath: .status.readyReplicas
+          description: Number of ready replicas
+        - name: Leader
+          type: string
+          jsonPath: .status.leader
+          description: Current Raft leader pod
+        - name: Image
+          type: string
+          jsonPath: .spec.image
+          description: GoraphDB container image
+          priority: 1
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: GoraphDBCluster represents a GoraphDB database cluster.
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required:
+                - image
+                - storage
+              properties:
+                # --- Cluster Topology ---
+                replicas:
+                  type: integer
+                  minimum: 1
+                  maximum: 7
+                  default: 1
+                  description: >
+                    Number of database nodes. Must be odd for Raft quorum (1,3,5).
+                    Maps to StatefulSet replicas.
+                image:
+                  type: string
+                  description: >
+                    Container image for GoraphDB (cmd/graphdb-ui).
+                imagePullPolicy:
+                  type: string
+                  enum: [Always, Never, IfNotPresent]
+                  default: IfNotPresent
+
+                # --- Storage Engine (maps to graphdb.Options) ---
+                shardCount:
+                  type: integer
+                  minimum: 1
+                  maximum: 64
+                  default: 1
+                  description: >
+                    Number of bbolt shards. Maps to Options.ShardCount / -shards flag.
+                workerPoolSize:
+                  type: integer
+                  minimum: 1
+                  maximum: 256
+                  default: 8
+                  description: >
+                    Query worker pool size. Maps to Options.WorkerPoolSize.
+                cacheBudget:
+                  type: string
+                  default: "128Mi"
+                  description: >
+                    Node cache budget (e.g. "256Mi"). Maps to Options.CacheBudget.
+                mmapSize:
+                  type: string
+                  default: "256Mi"
+                  description: >
+                    Initial mmap size (e.g. "512Mi"). Maps to Options.MmapSize.
+                noSync:
+                  type: boolean
+                  default: true
+                  description: >
+                    Disable per-tx fsync. Maps to Options.NoSync.
+                compactionInterval:
+                  type: string
+                  default: "0s"
+                  description: >
+                    Background compaction interval (e.g. "1h"). Maps to Options.CompactionInterval.
+
+                # --- Query Governor ---
+                slowQueryThreshold:
+                  type: string
+                  default: "100ms"
+                  description: >
+                    Slow query logging threshold. Maps to Options.SlowQueryThreshold.
+                maxResultRows:
+                  type: integer
+                  minimum: 0
+                  default: 0
+                  description: >
+                    Max rows per query (0=unlimited). Maps to Options.MaxResultRows.
+                defaultQueryTimeout:
+                  type: string
+                  default: "0s"
+                  description: >
+                    Default query timeout. Maps to Options.DefaultQueryTimeout.
+
+                # --- Write Backpressure ---
+                writeQueueSize:
+                  type: integer
+                  minimum: 1
+                  default: 64
+                  description: >
+                    Max concurrent writes per shard. Maps to Options.WriteQueueSize.
+                writeTimeout:
+                  type: string
+                  default: "5s"
+                  description: >
+                    Write queue wait timeout. Maps to Options.WriteTimeout.
+
+                # --- Storage ---
+                storage:
+                  type: object
+                  required:
+                    - dataSize
+                  properties:
+                    dataSize:
+                      type: string
+                      default: "10Gi"
+                      description: PVC size for shard data.
+                    walSize:
+                      type: string
+                      description: PVC size for WAL (optional, uses data volume if empty).
+                    raftSize:
+                      type: string
+                      description: PVC size for Raft state (optional, uses data volume if empty).
+                    storageClassName:
+                      type: string
+                      description: StorageClass name for PVCs.
+
+                # --- Resources ---
+                resources:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                  description: CPU/memory requests and limits.
+
+                # --- Ports ---
+                ports:
+                  type: object
+                  properties:
+                    http:
+                      type: integer
+                      minimum: 1
+                      maximum: 65535
+                      default: 7474
+                    raft:
+                      type: integer
+                      minimum: 1
+                      maximum: 65535
+                      default: 7000
+                    grpc:
+                      type: integer
+                      minimum: 1
+                      maximum: 65535
+                      default: 7001
+
+                # --- Monitoring ---
+                monitoring:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: true
+                    interval:
+                      type: string
+                      default: "30s"
+                    scrapeTimeout:
+                      type: string
+                      default: "10s"
+
+                # --- Scheduling ---
+                affinity:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                tolerations:
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                nodeSelector:
+                  type: object
+                  additionalProperties:
+                    type: string
+
+                # --- PDB ---
+                podDisruptionBudget:
+                  type: object
+                  properties:
+                    minAvailable:
+                      type: integer
+                      minimum: 0
+
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum:
+                    - Creating
+                    - Bootstrapping
+                    - Running
+                    - Scaling
+                    - Degraded
+                    - Failed
+                readyReplicas:
+                  type: integer
+                leader:
+                  type: string
+                currentImage:
+                  type: string
+                members:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      role:
+                        type: string
+                      ready:
+                        type: boolean
+                      walLSN:
+                        type: integer
+                      health:
+                        type: string
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      reason:
+                        type: string
+                      message:
+                        type: string
