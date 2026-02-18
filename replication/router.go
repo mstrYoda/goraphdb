@@ -263,6 +263,37 @@ func (r *Router) UpdateEdge(id graphdb.EdgeID, props graphdb.Props) error {
 }
 
 // ---------------------------------------------------------------------------
+// Index operations routing
+// ---------------------------------------------------------------------------
+
+// CreateIndex routes a CreateIndex operation.
+func (r *Router) CreateIndex(propName string) error {
+	err := r.db.CreateIndex(propName)
+	if errors.Is(err, graphdb.ErrReadOnlyReplica) {
+		return r.forwardIndexOp("CreateIndex", propName)
+	}
+	return err
+}
+
+// DropIndex routes a DropIndex operation.
+func (r *Router) DropIndex(propName string) error {
+	err := r.db.DropIndex(propName)
+	if errors.Is(err, graphdb.ErrReadOnlyReplica) {
+		return r.forwardIndexOp("DropIndex", propName)
+	}
+	return err
+}
+
+// ReIndex routes a ReIndex operation.
+func (r *Router) ReIndex(propName string) error {
+	err := r.db.ReIndex(propName)
+	if errors.Is(err, graphdb.ErrReadOnlyReplica) {
+		return r.forwardIndexOp("ReIndex", propName)
+	}
+	return err
+}
+
+// ---------------------------------------------------------------------------
 // Read operations — always local
 // ---------------------------------------------------------------------------
 
@@ -393,6 +424,17 @@ func (r *Router) forwardUpdateWrite(op string, id uint64, props graphdb.Props) e
 	}
 
 	body, _ := json.Marshal(writeOpRequest{Op: op, ID: id, Props: props})
+	_, err = r.postJSON(addr+"/api/write", body)
+	return err
+}
+
+func (r *Router) forwardIndexOp(op, propName string) error {
+	addr, err := r.leaderAddr()
+	if err != nil {
+		return err
+	}
+
+	body, _ := json.Marshal(writeOpRequest{Op: op, PropName: propName})
 	_, err = r.postJSON(addr+"/api/write", body)
 	return err
 }

@@ -10,7 +10,7 @@ function formatValue(v: any): string {
 }
 
 export default function ResultsTable({ columns, rows }: Props) {
-  if (columns.length === 0) return null
+  if (!columns || columns.length === 0) return null
 
   return (
     <div className="overflow-auto border border-slate-800 rounded-lg">

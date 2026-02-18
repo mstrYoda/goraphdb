@@ -42,12 +42,18 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	goraphdbv1alpha1 "github.com/mstrYoda/goraphdb/operator/api/v1alpha1"
 )
 
 // reconcileStatefulSet creates or updates the StatefulSet for the GoraphDB cluster.
+//
+// StatefulSet VolumeClaimTemplates are immutable after creation. On update,
+// we must preserve the existing templates to avoid API validation errors.
+// If VolumeClaimTemplates need to change, the StatefulSet must be deleted
+// and recreated (handled by the operator during major upgrades).
 func (r *GoraphDBClusterReconciler) reconcileStatefulSet(ctx context.Context, cluster *goraphdbv1alpha1.GoraphDBCluster) error {
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -61,8 +67,18 @@ func (r *GoraphDBClusterReconciler) reconcileStatefulSet(ctx context.Context, cl
 			return err
 		}
 
+		// Preserve existing VolumeClaimTemplates (immutable field).
+		existingVCTs := sts.Spec.VolumeClaimTemplates
+
 		sts.Labels = commonLabels(cluster)
 		r.buildStatefulSetSpec(cluster, sts)
+
+		// If the StatefulSet already exists, restore the original
+		// VolumeClaimTemplates to avoid immutable field validation errors.
+		if len(existingVCTs) > 0 {
+			sts.Spec.VolumeClaimTemplates = existingVCTs
+		}
+
 		return nil
 	})
 	return err
@@ -385,9 +401,9 @@ func (r *GoraphDBClusterReconciler) buildVolumeClaimTemplates(cluster *goraphdbv
 				Labels: commonLabels(cluster),
 			},
 			Spec: corev1.PersistentVolumeClaimSpec{
-				AccessModes: []corev1.PersistentVolumeAccessMode{
-					corev1.ReadWriteOnce, // Each pod needs exclusive access to its data
-				},
+			AccessModes: []corev1.PersistentVolumeAccessMode{
+				corev1.ReadWriteMany,
+			},
 				Resources: corev1.VolumeResourceRequirements{
 					Requests: corev1.ResourceList{
 						corev1.ResourceStorage: cluster.Spec.Storage.DataSize,
@@ -407,7 +423,7 @@ func (r *GoraphDBClusterReconciler) buildVolumeClaimTemplates(cluster *goraphdbv
 			},
 			Spec: corev1.PersistentVolumeClaimSpec{
 				AccessModes: []corev1.PersistentVolumeAccessMode{
-					corev1.ReadWriteOnce,
+					corev1.ReadWriteMany,
 				},
 				Resources: corev1.VolumeResourceRequirements{
 					Requests: corev1.ResourceList{
@@ -428,7 +444,7 @@ func (r *GoraphDBClusterReconciler) buildVolumeClaimTemplates(cluster *goraphdbv
 			},
 			Spec: corev1.PersistentVolumeClaimSpec{
 				AccessModes: []corev1.PersistentVolumeAccessMode{
-					corev1.ReadWriteOnce,
+					corev1.ReadWriteMany,
 				},
 				Resources: corev1.VolumeResourceRequirements{
 					Requests: corev1.ResourceList{

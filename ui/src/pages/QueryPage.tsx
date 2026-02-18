@@ -15,6 +15,10 @@ const EXAMPLES = [
   'MATCH (a)-[:follows*1..2]->(b) RETURN b LIMIT 25',
   'MATCH (a)-[r]->(b) RETURN type(r), a, b LIMIT 25',
   'MATCH (n) RETURN n.name, n.age ORDER BY n.age DESC LIMIT 10',
+  'CREATE (n:Person {name: "Alice", age: 30}) RETURN n',
+  'CREATE (a:Person {name: "Bob"})-[:FOLLOWS]->(b:Person {name: "Charlie"}) RETURN a, b',
+  'CREATE (n:City {name: "Istanbul", population: 16000000})',
+  'MERGE (n:Person {name: "Alice"}) RETURN n',
 ]
 
 export default function QueryPage() {

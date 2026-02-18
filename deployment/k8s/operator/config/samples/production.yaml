@@ -34,8 +34,8 @@ spec:
   # Raft quorum = 3, so the cluster remains available with 3/5 nodes.
   replicas: 5
 
-  image: ghcr.io/mstryoda/goraphdb:v0.1.0
-  imagePullPolicy: IfNotPresent
+  image: registry.trendyol.com/platform/devops/base/apps/sre/benchmarks/graph:db-1
+  imagePullPolicy: Always
 
   # -------------------------------------------------------------------------
   # Storage Engine (maps to graphdb.Options in types.go)
@@ -117,9 +117,14 @@ spec:
     # 2Gi for Raft state: more than enough for raft-log.db + raft-stable.db.
     raftSize: 2Gi
 
-    # Use SSD-backed storage for production.
-    # Adjust to your cloud provider's SSD StorageClass.
-    storageClassName: ssd
+    # StorageClass for PVCs. If omitted, uses the cluster's default StorageClass.
+    # Set this to match your environment:
+    #   Ceph:  "csi-rbd-sc" (or whatever your rbd.csi.ceph.com SC is named)
+    #   AWS:   "gp3"
+    #   GCP:   "premium-rwo"
+    #   Azure: "managed-premium"
+    #   Local: "standard"
+    storageClassName: manual
 
   # -------------------------------------------------------------------------
   # Compute Resources
@@ -170,9 +175,9 @@ spec:
                 app.kubernetes.io/instance: goraphdb-prod
             topologyKey: topology.kubernetes.io/zone
 
-  # Schedule on nodes with SSD storage.
-  nodeSelector:
-    node.kubernetes.io/storage-type: ssd
+  # Uncomment and adjust for your node labels:
+  # nodeSelector:
+  #   node.kubernetes.io/storage-type: ssd
 
   # -------------------------------------------------------------------------
   # Availability

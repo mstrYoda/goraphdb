@@ -17,7 +17,7 @@ apiVersion: goraphdb.io/v1alpha1
 kind: GoraphDBCluster
 metadata:
   name: goraphdb-dev
-  namespace: default
+  namespace: goraphdb
 spec:
   # Single node — standalone mode, no Raft cluster.
   replicas: 1

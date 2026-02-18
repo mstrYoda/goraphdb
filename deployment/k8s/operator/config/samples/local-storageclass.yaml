@@ -1,0 +1,15 @@
+# ============================================================================
+# Manual StorageClass for static PV provisioning
+#
+# Required for hostPath PVs — Kubernetes needs this StorageClass object
+# to exist so PVCs with storageClassName: manual can bind to PVs.
+#
+# No dynamic provisioner — PVs must be created manually.
+# ============================================================================
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: manual
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Retain

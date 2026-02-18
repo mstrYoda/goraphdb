@@ -1,0 +1,245 @@
+# ============================================================================
+# GoraphDB — hostPath PersistentVolumes
+#
+# 15 PVs for a 5-node GoraphDB cluster:
+#   - 5x data (100Gi) — bbolt shard data
+#   - 5x wal  (20Gi)  — Write-Ahead Log segments
+#   - 5x raft (2Gi)   — Raft consensus state
+#
+# hostPath auto-creates directories on the node. No manual mkdir needed.
+#
+# Usage:
+#   kubectl apply -f ceph-persistent-volumes.yaml
+#   kubectl apply -f production.yaml
+# ============================================================================
+
+# — DATA VOLUMES —
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: goraphdb-data-pv-0
+spec:
+  capacity:
+    storage: 100Gi
+  hostPath:
+    path: /data/goraphdb/data-0
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: goraphdb-data-pv-1
+spec:
+  capacity:
+    storage: 100Gi
+  hostPath:
+    path: /data/goraphdb/data-1
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: goraphdb-data-pv-2
+spec:
+  capacity:
+    storage: 100Gi
+  hostPath:
+    path: /data/goraphdb/data-2
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: goraphdb-data-pv-3
+spec:
+  capacity:
+    storage: 100Gi
+  hostPath:
+    path: /data/goraphdb/data-3
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: goraphdb-data-pv-4
+spec:
+  capacity:
+    storage: 100Gi
+  hostPath:
+    path: /data/goraphdb/data-4
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+
+# — WAL VOLUMES —
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: goraphdb-wal-pv-0
+spec:
+  capacity:
+    storage: 20Gi
+  hostPath:
+    path: /data/goraphdb/wal-0
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: goraphdb-wal-pv-1
+spec:
+  capacity:
+    storage: 20Gi
+  hostPath:
+    path: /data/goraphdb/wal-1
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: goraphdb-wal-pv-2
+spec:
+  capacity:
+    storage: 20Gi
+  hostPath:
+    path: /data/goraphdb/wal-2
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: goraphdb-wal-pv-3
+spec:
+  capacity:
+    storage: 20Gi
+  hostPath:
+    path: /data/goraphdb/wal-3
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: goraphdb-wal-pv-4
+spec:
+  capacity:
+    storage: 20Gi
+  hostPath:
+    path: /data/goraphdb/wal-4
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+
+# — RAFT VOLUMES —
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: goraphdb-raft-pv-0
+spec:
+  capacity:
+    storage: 2Gi
+  hostPath:
+    path: /data/goraphdb/raft-0
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: goraphdb-raft-pv-1
+spec:
+  capacity:
+    storage: 2Gi
+  hostPath:
+    path: /data/goraphdb/raft-1
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: goraphdb-raft-pv-2
+spec:
+  capacity:
+    storage: 2Gi
+  hostPath:
+    path: /data/goraphdb/raft-2
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: goraphdb-raft-pv-3
+spec:
+  capacity:
+    storage: 2Gi
+  hostPath:
+    path: /data/goraphdb/raft-3
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: goraphdb-raft-pv-4
+spec:
+  capacity:
+    storage: 2Gi
+  hostPath:
+    path: /data/goraphdb/raft-4
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual

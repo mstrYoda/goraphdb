@@ -36,6 +36,9 @@ type WriteForwarder interface {
 	UpdateNode(id graphdb.NodeID, props graphdb.Props) error
 	UpdateEdge(id graphdb.EdgeID, props graphdb.Props) error
 	Query(ctx context.Context, query string) (*graphdb.CypherResult, error)
+	CreateIndex(propName string) error
+	DropIndex(propName string) error
+	ReIndex(propName string) error
 }
 
 // ---------------------------------------------------------------------------
@@ -247,7 +250,13 @@ func (s *Server) handleCreateIndex(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "property is required")
 		return
 	}
-	if err := s.db.CreateIndex(req.Property); err != nil {
+	var err error
+	if s.router != nil {
+		err = s.router.CreateIndex(req.Property)
+	} else {
+		err = s.db.CreateIndex(req.Property)
+	}
+	if err != nil {
 		writeError(w, 500, err.Error())
 		return
 	}
@@ -256,7 +265,13 @@ func (s *Server) handleCreateIndex(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDropIndex(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	if err := s.db.DropIndex(name); err != nil {
+	var err error
+	if s.router != nil {
+		err = s.router.DropIndex(name)
+	} else {
+		err = s.db.DropIndex(name)
+	}
+	if err != nil {
 		writeError(w, 500, err.Error())
 		return
 	}
@@ -265,7 +280,13 @@ func (s *Server) handleDropIndex(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleReIndex(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	if err := s.db.ReIndex(name); err != nil {
+	var err error
+	if s.router != nil {
+		err = s.router.ReIndex(name)
+	} else {
+		err = s.db.ReIndex(name)
+	}
+	if err != nil {
 		writeError(w, 500, err.Error())
 		return
 	}
@@ -333,6 +354,10 @@ func (s *Server) handleCypher(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	cols := result.Columns
+	if cols == nil {
+		cols = []string{}
+	}
 	rows := result.Rows
 	if rows == nil {
 		rows = []map[string]any{}
@@ -341,7 +366,7 @@ func (s *Server) handleCypher(w http.ResponseWriter, r *http.Request) {
 	graph := s.extractGraphData(result)
 
 	writeJSON(w, 200, cypherResponse{
-		Columns:    result.Columns,
+		Columns:    cols,
 		Rows:       rows,
 		Graph:      graph,
 		RowCount:   len(rows),
@@ -558,6 +583,10 @@ func (s *Server) handleCypherExecute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	cols := result.Columns
+	if cols == nil {
+		cols = []string{}
+	}
 	rows := result.Rows
 	if rows == nil {
 		rows = []map[string]any{}
@@ -566,7 +595,7 @@ func (s *Server) handleCypherExecute(w http.ResponseWriter, r *http.Request) {
 	graph := s.extractGraphData(result)
 
 	writeJSON(w, 200, cypherResponse{
-		Columns:    result.Columns,
+		Columns:    cols,
 		Rows:       rows,
 		Graph:      graph,
 		RowCount:   len(rows),
@@ -1287,12 +1316,13 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 // writeOpRequest is the JSON payload sent by a follower's Router when
 // forwarding a write operation to the leader's HTTP API.
 type writeOpRequest struct {
-	Op    string         `json:"op"`
-	ID    uint64         `json:"id,omitempty"`
-	From  uint64         `json:"from,omitempty"`
-	To    uint64         `json:"to,omitempty"`
-	Label string         `json:"label,omitempty"`
-	Props map[string]any `json:"props,omitempty"`
+	Op       string         `json:"op"`
+	ID       uint64         `json:"id,omitempty"`
+	From     uint64         `json:"from,omitempty"`
+	To       uint64         `json:"to,omitempty"`
+	Label    string         `json:"label,omitempty"`
+	Props    map[string]any `json:"props,omitempty"`
+	PropName string         `json:"prop_name,omitempty"`
 }
 
 // writeOpResponse is the JSON response returned to the forwarding router.
@@ -1337,6 +1367,15 @@ func (s *Server) handleForwardedWrite(w http.ResponseWriter, r *http.Request) {
 
 	case "UpdateEdge":
 		opErr = s.db.UpdateEdge(graphdb.EdgeID(req.ID), req.Props)
+
+	case "CreateIndex":
+		opErr = s.db.CreateIndex(req.PropName)
+
+	case "DropIndex":
+		opErr = s.db.DropIndex(req.PropName)
+
+	case "ReIndex":
+		opErr = s.db.ReIndex(req.PropName)
 
 	default:
 		writeJSON(w, 400, writeOpResponse{Error: fmt.Sprintf("unknown write op: %s", req.Op)})

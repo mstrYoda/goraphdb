@@ -192,16 +192,24 @@ func (r *GoraphDBClusterReconciler) reconcileClientService(ctx context.Context, 
 			selector[LabelRole] = "leader"
 		}
 
-		svc.Spec = corev1.ServiceSpec{
-			Type:     corev1.ServiceTypeClusterIP,
-			Selector: selector,
-			Ports: []corev1.ServicePort{
-				{
-					Name:     "http",
-					Port:     cluster.Spec.Ports.HTTP,
-					Protocol: corev1.ProtocolTCP,
-				},
+		// Preserve the existing clusterIP on update. Kubernetes assigns a
+		// clusterIP on creation and it becomes immutable — overwriting the
+		// entire Spec would clear it, causing an API validation error:
+		//   "spec.clusterIPs[0]: Invalid value: primary clusterIP can not be unset"
+		existingClusterIP := svc.Spec.ClusterIP
+
+		svc.Spec.Type = corev1.ServiceTypeClusterIP
+		svc.Spec.Selector = selector
+		svc.Spec.Ports = []corev1.ServicePort{
+			{
+				Name:     "http",
+				Port:     cluster.Spec.Ports.HTTP,
+				Protocol: corev1.ProtocolTCP,
 			},
+		}
+
+		if existingClusterIP != "" {
+			svc.Spec.ClusterIP = existingClusterIP
 		}
 		return nil
 	})
@@ -238,17 +246,22 @@ func (r *GoraphDBClusterReconciler) reconcileReadService(ctx context.Context, cl
 		labels[LabelComponent] = "read"
 		svc.Labels = labels
 
-		svc.Spec = corev1.ServiceSpec{
-			Type: corev1.ServiceTypeClusterIP,
-			// No role selector — routes to all ready pods.
-			Selector: selectorLabels(cluster),
-			Ports: []corev1.ServicePort{
-				{
-					Name:     "http",
-					Port:     cluster.Spec.Ports.HTTP,
-					Protocol: corev1.ProtocolTCP,
-				},
+		// Preserve existing clusterIP (same reason as client Service).
+		existingClusterIP := svc.Spec.ClusterIP
+
+		svc.Spec.Type = corev1.ServiceTypeClusterIP
+		// No role selector — routes to all ready pods.
+		svc.Spec.Selector = selectorLabels(cluster)
+		svc.Spec.Ports = []corev1.ServicePort{
+			{
+				Name:     "http",
+				Port:     cluster.Spec.Ports.HTTP,
+				Protocol: corev1.ProtocolTCP,
 			},
+		}
+
+		if existingClusterIP != "" {
+			svc.Spec.ClusterIP = existingClusterIP
 		}
 		return nil
 	})

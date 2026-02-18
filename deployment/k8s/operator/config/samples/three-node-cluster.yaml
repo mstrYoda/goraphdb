@@ -31,7 +31,7 @@ apiVersion: goraphdb.io/v1alpha1
 kind: GoraphDBCluster
 metadata:
   name: goraphdb-ha
-  namespace: default
+  namespace: goraphdb
 spec:
   # 3-node cluster: tolerates 1 failure, Raft quorum = 2.
   replicas: 3

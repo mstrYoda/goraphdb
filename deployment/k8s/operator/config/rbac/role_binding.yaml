@@ -15,4 +15,4 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: goraphdb-operator
-    namespace: goraphdb-system
+    namespace: goraphdb

@@ -17,7 +17,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: goraphdb-operator
-  namespace: goraphdb-system
+  namespace: goraphdb
   labels:
     app.kubernetes.io/name: goraphdb-operator
     app.kubernetes.io/component: operator
@@ -34,13 +34,15 @@ spec:
         app.kubernetes.io/component: operator
         app.kubernetes.io/part-of: goraphdb
     spec:
+      imagePullSecrets:
+        - name: goraphdb-registry-secret
       serviceAccountName: goraphdb-operator
       terminationGracePeriodSeconds: 10
       securityContext:
         runAsNonRoot: true
       containers:
         - name: manager
-          image: ghcr.io/mstryoda/goraphdb-operator:latest
+          image: registry.trendyol.com/platform/devops/base/apps/sre/benchmarks/graph:operator-1
           args:
             - --metrics-bind-address=:8080
             - --health-probe-bind-address=:8081

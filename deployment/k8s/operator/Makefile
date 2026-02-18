@@ -19,7 +19,7 @@ IMG ?= ghcr.io/mstryoda/goraphdb-operator:latest
 GORAPHDB_IMG ?= ghcr.io/mstryoda/goraphdb:latest
 
 # Kubernetes namespace for the operator
-NAMESPACE ?= goraphdb-system
+NAMESPACE ?= goraphdb
 
 .PHONY: all
 all: fmt vet build

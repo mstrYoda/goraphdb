@@ -111,8 +111,10 @@ func (r *GoraphDBClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	if *cluster.Spec.Replicas > 1 {
 		if err := r.reconcilePDB(ctx, &cluster); err != nil {
-			log.Error(err, "failed to reconcile PDB")
-			return ctrl.Result{}, err
+			// PDB creation is best-effort: the policy/v1 API may not be
+			// available on all clusters (e.g., k3s minimal installs).
+			// Log a warning but don't fail the entire reconciliation.
+			log.Info("PDB reconciliation skipped (policy/v1 may not be available)", "error", err.Error())
 		}
 	}
 
@@ -436,16 +438,21 @@ func isPodReady(pod *corev1.Pod) bool {
 //
 // The controller watches:
 // - GoraphDBCluster (primary resource)
-// - StatefulSet, Service, ConfigMap, PDB (owned resources)
+// - StatefulSet, Service, ConfigMap (owned resources)
 //
 // When any owned resource changes, the reconciler is triggered for the
 // owning GoraphDBCluster (via OwnerReference back-reference).
+//
+// Note: PodDisruptionBudget is NOT watched via Owns() because the policy/v1
+// API may not be available on all clusters (e.g., minimal k3s setups).
+// PDBs are still created/updated in the reconcile loop — we just don't
+// need PDB changes to trigger reconciliation (they're rarely modified
+// outside the operator).
 func (r *GoraphDBClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&goraphdbv1alpha1.GoraphDBCluster{}).
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).
-		Owns(&policyv1.PodDisruptionBudget{}).
 		Complete(r)
 }
