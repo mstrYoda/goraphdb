@@ -1227,6 +1227,67 @@ CypherQuery
 
 ---
 
+# Step 4b — How the AST Becomes Executable Code
+
+The AST is **not compiled** — it's a Go struct tree that the executor **walks at runtime**.
+Each AST node type maps to a Go function call:
+
+```go
+func (db *DB) executeCypherNormal(ctx, q *CypherQuery) {
+    pat := q.Match.Pattern
+
+    switch {
+    case len(pat.Nodes)==1 && len(pat.Rels)==0:
+        // MATCH (n)  or  MATCH (n {prop: val})
+        return db.execNodeMatch(ctx, q)       // ← Strategy 1
+
+    case len(pat.Nodes)==2 && len(pat.Rels)==1:
+        if rel.VarLength {
+            return db.execVarLengthMatch(ctx, q)  // ← Strategy 3
+        }
+        return db.execSingleHopMatch(ctx, q)      // ← Strategy 2
+    }
+}
+```
+
+The executor reads the **shape** of the AST (how many nodes, how many rels, variable-length?) and picks a strategy — then each strategy reads deeper AST fields (labels, props, WHERE) to decide scanning.
+
+---
+
+# Step 4c — AST Fields Drive Every Decision
+
+```
+CypherQuery AST                       Executor reads...
+─────────────────                     ──────────────────
+Match.Pattern.Nodes[0]
+  .Labels = ["Person"]          ───►  pick label scan vs full scan
+  .Props  = {name: "Alice"}     ───►  pick index seek vs filter
+
+Match.Pattern.Rels[0]
+  .Label  = "follows"           ───►  filter edges by label
+  .Dir    = Outgoing            ───►  scan adj_out (not adj_in)
+```
+
+---
+
+```
+CypherQuery AST                       Executor reads...
+─────────────────                     ──────────────────
+
+Where
+  .ComparisonExpr               ───►  evalExpr() on each candidate
+  .Op = ">"                     ───►  compare property value
+
+Return
+  .OrderBy = [b.age DESC]       ───►  use top-K heap (not full sort)
+  .Limit   = 3                  ───►  heap size = 3, stop early
+```
+
+> The AST is a **data structure**. The executor is **Go code that interprets it**.
+> No bytecode, no VM — just struct field reads and bbolt transactions.
+
+---
+
 # Step 5 — Executor: Plan Selection
 
 The executor inspects the AST and picks **scan strategies**:
